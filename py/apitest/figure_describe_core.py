@@ -9,11 +9,17 @@ import base64
 import json
 import mimetypes
 import os
+import random
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
+
+# 与 aidoc_llm.OpenAIClient 一致：429/5xx/连接类可重试
+from aidoc_llm import _openai_max_retries, _openai_transient_http_status
 
 
 @dataclass
@@ -185,6 +191,30 @@ def _strip_json_fences(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _vlm_should_retry(exc: BaseException) -> bool:
+    """与 aidoc_llm 瞬态错误判定一致；仅对可恢复错误重试。"""
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        return _openai_transient_http_status(exc.status_code)
+    return False
+
+
+def _vlm_retry_delay_s(attempt: int, exc: BaseException) -> float:
+    """指数退避；502/网关说明里常建议至少 60s；尊重 Retry-After 头（秒）。"""
+    base = min(120.0, (1.5**attempt) + random.uniform(0.0, 0.5))
+    if isinstance(exc, APIStatusError) and exc.response is not None:
+        ra = exc.response.headers.get("retry-after") or exc.response.headers.get("Retry-After")
+        if ra:
+            try:
+                return min(300.0, float(ra))
+            except ValueError:
+                pass
+    if isinstance(exc, APIStatusError) and exc.status_code == 502:
+        base = max(base, 60.0)
+    return base
+
+
 def _parse_model_json_text(raw: str) -> dict[str, Any]:
     """从 assistant 正文中解出 JSON 对象；容忍 ``` 围栏与前后说明。"""
     t = _strip_json_fences(raw)
@@ -215,22 +245,46 @@ def run_figure_describe(
         raise ValueError("base_url 为空；请传与 API_URL 相同的根地址（含 /v1）")
     client = OpenAI(api_key=api_key, base_url=bu, timeout=_vlm_timeout_sec())
     data_url = _data_url_for_image(image_path)
-    response = client.chat.completions.create(
-        model=model,
-        max_tokens=4096,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": data_url},
-                    },
-                ],
-            }
-        ],
-    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": data_url},
+                },
+            ],
+        }
+    ]
+
+    max_retries = _openai_max_retries()
+    attempt = 0
+    response = None
+    while True:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=4096,
+                messages=messages,
+            )
+            break
+        except Exception as e:
+            if _vlm_should_retry(e) and attempt < max_retries:
+                delay = _vlm_retry_delay_s(attempt, e)
+                sc = getattr(e, "status_code", None) or type(e).__name__
+                print(
+                    f"[batch_describe] VLM 可重试错误 ({sc})，{delay:.1f}s 后重试 "
+                    f"({attempt + 1}/{max_retries})...",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                attempt += 1
+                continue
+            raise
+    if response is None:
+        raise RuntimeError("VLM: no response after retries")
+
     c0 = response.choices[0] if response.choices else None
     msg = getattr(c0, "message", None) if c0 else None
     raw = (getattr(msg, "content", None) or "").strip()

@@ -1,6 +1,8 @@
 secrets.sh
 output/
 logs/
+# 本地历史备份（git 外）；勿在「清理/重跑」时删除，除非你主动腾磁盘
+archive/
 # 输入 PDF 体积大，由使用者本地放置；见 input/README.txt
 input/*.pdf
 # Python

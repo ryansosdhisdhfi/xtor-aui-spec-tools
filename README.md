@@ -10,6 +10,9 @@
 | `py/` | 管线所需 Python 脚本；`make` 调用的就是这里的入口 |
 | `input/` | 待处理 PDF（见 `input/README.txt`） |
 | `output/`、`logs/` | 运行产物与日志（默认不入库） |
+| `archive/` | **本地备份目录**（`backup_output_logs.sh` 将旧 `output/`、`logs/` 移入此下）；**全量重跑前清理时勿删**，除非你主动要腾空间。 |
+
+**重跑前清理约定**：只清空或替换 `output/` 与 `logs/`；`archive/` 保留。可用 `bash scripts/backup_output_logs.sh` 先备份再跑 `make all`。
 
 ---
 
