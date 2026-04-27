@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -85,8 +86,8 @@ def main() -> int:
     ap.add_argument("--model", default="gpt-5.4")
     ap.add_argument(
         "--base-url",
-        default="https://backend.intelalloc.com",
-        help="与 describe_image_wsl 一致，通常不带 /v1",
+        default="",
+        help="OpenAI 兼容根 URL，须含 /v1（与 secrets 中 API_URL 一致）。空则读环境变量 API_URL",
     )
     ap.add_argument(
         "--max-context-chars",
@@ -119,6 +120,11 @@ def main() -> int:
     api_key = default_api_key(args.api_key)
     if not api_key:
         print("错误: 请设置 --api-key 或 OPENAI_API_KEY", file=sys.stderr)
+        return 1
+
+    base_url = (args.base_url or os.environ.get("API_URL") or "").strip()
+    if not base_url:
+        print("错误: 请设置 --base-url 或环境变量 API_URL（须含 /v1）", file=sys.stderr)
         return 1
 
     filtered_path = Path(args.filtered_json).resolve()
@@ -263,7 +269,7 @@ def main() -> int:
                 image_path,
                 prompt,
                 api_key=api_key,
-                base_url=args.base_url,
+                base_url=base_url,
                 model=args.model,
             )
         except Exception as e:  # noqa: BLE001

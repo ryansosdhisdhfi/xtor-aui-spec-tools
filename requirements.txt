@@ -1,11 +1,23 @@
-# 与 Aidoc 工具链 venv 对齐的最小集，例如:
-#   pip install -r /path/to/xtor-aui-spec-tools/requirements.txt
+# 与 Aidoc 工具链 venv 对齐的最小集。
+#
+# --- 若安装卡在「下载 nvidia-*.whl / 数百 MB」---
+# 多为 PyPI 默认装「带 CUDA 的 torch」导致。可二选一：
+#   A) 只跑 CPU：先见 scripts/install_deps_cpu_wsl.sh（先装 CPU 版 torch 再装本文件，可少下 GB 级驱动包）
+#   B) 需要 GPU：保持直接 pip install -r，并加大 --default-timeout=1000、网络稳定时多试几次
+#
+# --- 看不到进度、怕卡死时：---
+#   pip install -r requirements.txt -v --default-timeout=1000
+# 安装阶段会持续刷日志；更细可用 -vv。make 管线请 tail -f logs/pipeline.log
 #
 requests>=2.28.0
+# B5 batch_describe / figure_describe_core：OpenAI 兼容客户端
+openai>=1.0.0
 pyyaml>=6.0
 pypdf>=4.0
 docling>=2.0.0
 docling-core>=2.0.0
+# Docling 默认 Full-page OCR 使用 EasyOCR（a1-convert 未加 --no-ocr 时必需）
+easyocr>=1.7.0
 pymupdf>=1.24.0
 # 图内 OCR（可选 B4，且需本机 Tesseract + 语言包）
 pytesseract>=0.3.10

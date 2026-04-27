@@ -15,6 +15,7 @@ aidoc_index.py - RAG 语义索引工具
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -202,6 +203,21 @@ def _normalize_summary_payload(data: dict) -> tuple[str, list[str]]:
     return summary, keywords
 
 
+def _summary_input_char_limit() -> Optional[int]:
+    """
+    摘要输入正文长度上限（字符）。默认不截断，整段 chunk 交给 LLM。
+    若网关/模型有硬性 context 限制，可设环境变量 AIDOC_INDEX_MAX_CHUNK_CHARS（正整数）。
+    """
+    raw = (os.environ.get("AIDOC_INDEX_MAX_CHUNK_CHARS") or "").strip()
+    if not raw or raw == "0":
+        return None
+    try:
+        n = int(raw)
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
 def summarize_chunk(
     llm: LLMClient,
     content: str,
@@ -213,15 +229,18 @@ def summarize_chunk(
     """
     调用 LLM 为单个 chunk 生成摘要和关键字。
 
+    默认将本 chunk 全文（不截断）写入提示；过长时仅当设置
+    AIDOC_INDEX_MAX_CHUNK_CHARS 才会截断。
+
     Returns:
         (摘要文本, 关键字列表)；内容过短或调用失败时返回 ("", [])
     """
     if len(content.strip()) < 50:
         return "", []
 
-    max_content = 4000
-    if len(content) > max_content:
-        content = content[:max_content] + "..."
+    lim = _summary_input_char_limit()
+    if lim is not None and len(content) > lim:
+        content = content[:lim] + "\n...[truncated: AIDOC_INDEX_MAX_CHUNK_CHARS]"
 
     prompt = f"""请分析以下章节内容，生成简洁的摘要和关键字。
 

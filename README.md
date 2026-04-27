@@ -6,7 +6,7 @@
 
 | 内容 | 说明 |
 |------|------|
-| `Makefile` | 串联 a1–a4（正文基线）与 b2–b7（图链 + 终稿索引） |
+| `Makefile` | 串联 a1–a4（正文基线）与 b1–b7（图链相对化 + 终稿索引） |
 | `py/` | 管线所需 Python 脚本；`make` 调用的就是这里的入口 |
 | `input/` | 待处理 PDF（见 `input/README.txt`） |
 | `output/`、`logs/` | 运行产物与日志（默认不入库） |
@@ -25,7 +25,8 @@ cd xtor-aui-spec-tools
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+# 建议加 -v：安装阶段会持续输出，便于区分「慢」与「卡死」（大 torch/nvidia 包在 /mnt/c 上可能仍要很久）
+pip install -r requirements.txt -v --default-timeout=1000
 
 cp secrets.sh.example secrets.sh
 # 编辑 secrets.sh：填写 API_URL（须含 /v1）、API_KEY、MODEL
@@ -44,6 +45,14 @@ WSL 下若写绝对路径，例如：
 **说明**：`make` 会 `cd` 到 `REPO`，再执行本仓 `py/` 中的脚本；**主流程不依赖** `REPO` 下是否还有**另一套** `aidoc_*.py` 副本——`py/` 里已经带了管线入口。
 
 **未设置 `REPO` 时**，`Makefile` 会把 `REPO` 设成「本目录上溯两级」——这是给**旧式目录结构**的兼容。若本仓**单独**放在 `Desktop/xtor-aui-spec-tools` 这类路径，**默认往往不对**，请务必用上面的 **`export REPO="$(pwd)"`**（在**本仓根**执行时）。
+
+### 长时间安装 / 跑管线时怎么知道「还在跑」
+
+| 场景 | 建议 |
+|------|------|
+| **`pip install` 很久没新行** | 使用 **`-v`**（或 **`-vv`** 更细）：安装阶段会陆续打印处理过程，比默认静默好判断。例：`pip install -r requirements.txt -v --default-timeout=1000`。下载进度条若被关掉，可设 `export PIP_PROGRESS_BAR=on`（视 pip 版本而定）。 |
+| **`make` 某一步不知是否挂住** | 另开终端 **`tail -f logs/pipeline.log`** 或 **`ls -lt logs/run_*.log | head -1`** 看最新日志是否还在增长。`make` 每步都会往 `logs/` 写。 |
+| **venv 在 `/mnt/c/...` 上** | 装大 GPU 包时解压写盘会**特别慢**，属正常现象；若可接受，把项目放到 WSL 家目录（如 `~/work/...`）会快一些。 |
 
 ---
 
@@ -66,6 +75,8 @@ WSL 下若写绝对路径，例如：
 |------|------|
 | [RUN_REPRO.md](RUN_REPRO.md) | 与上文一致的复现、可选 RAG |
 | [REPO_SYNC.md](REPO_SYNC.md) | `py/` 与上游脚本的维护说明 |
+| [runs/BACKLOG.md](runs/BACKLOG.md) | 规划中的增强（如超大 PDF 全自动分片合并） |
+| [runs/IMAGE_NAMING.md](runs/IMAGE_NAMING.md) | 图：MD 路径、`fig_`、JSON 如何**按顺序**一一对应 |
 
 ## Makefile 目标摘要
 
@@ -73,7 +84,7 @@ WSL 下若写绝对路径，例如：
 |------|------|
 | `a1-convert` … `a4-codeblocks` | PDF → 清洗与结构修复 |
 | `a5-index` | 首次索引（可选） |
-| `b2` … `b7` | 图链与 enriched 终稿索引 |
+| `b1` … `b7` | 图链相对化、筛图/上下文、OCR、VLM 注入、终稿索引 |
 | `all` | `a-all` + `b-all` |
 
 ## 无 `make` 时

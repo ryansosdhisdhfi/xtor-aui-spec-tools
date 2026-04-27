@@ -184,6 +184,12 @@ class CodeBlockAnalyzer:
     # 强代码语法特征（单字符/双字符标记，出现即可排除正文误判）
     STRONG_CODE_INDICATORS = [';', '{', '}', ':=', '<=', '=>', '()', '[]', '->']
 
+    # 规范/伪代码行：易被误判为「英文正文」(prose_in_code)
+    _RE_SPEC_FUNC_START = re.compile(
+        r'^(MAX|MIN|CLAMP|ABS|ROUND|FLOOR|CEIL|MOD|LOG2)\s*\(',
+        re.I,
+    )
+
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
 
@@ -367,6 +373,45 @@ class CodeBlockAnalyzer:
     # 内容分类判断
     # -------------------------------------------------------------------------
 
+    def _is_likely_spec_pseudo_code(self, text: str) -> bool:
+        """
+        DSC 等规范里常见「数学/伪代码」行，勿标为 prose_in_code（见 logs 中 MAX(、P2=CLAMP 等误报）。
+        """
+        t = text.strip()
+        if not t or len(t) < 8:
+            return False
+        if self._RE_SPEC_FUNC_START.match(t):
+            return True
+        if re.search(r'=\s*(CLAMP|MAX|MIN|ABS|ROUND|FLOOR|CEIL)\s*\(', t, re.I):
+            return True
+        if re.search(r'[A-Za-z_][\w.]*\s*=\s*', t) and sum(1 for c in t if c in '=*()') >= 3:
+            return True
+        if sum(1 for c in t if c in '=*()[]') >= 5:
+            return True
+        if re.match(r'where\s*:', t, re.I):
+            return True
+        return False
+
+    def _is_spec_inline_narrative(self, text: str) -> bool:
+        """
+        规范 PDF 中常见：英文说明句与伪代码同处在 ``` 块内（如 DSC），易被标 prose_in_code。
+        与「应迁出到正文」的编辑问题不同，下游 b 链/检索主要不依赖本检测；此处降告警噪音。
+        """
+        t = text.strip()
+        if len(t) < 40:
+            return False
+        tl = t.lower()
+        if tl.startswith("in addition to responding"):
+            return True
+        if "referred to as" in tl and ("`" in t or "``" in t):
+            return True
+        if t.startswith("The "):
+            if "are blended" in tl or "value is true when" in tl:
+                return True
+            if "algorithm adjusts" in tl:
+                return True
+        return False
+
     def _is_prose(self, text: str, lines: list[str] = None, index: int = 0) -> bool:
         """
         判断一行文本是否为正文（不应出现在代码块内）。
@@ -377,6 +422,12 @@ class CodeBlockAnalyzer:
           3. 兜底规则：大写开头 + 足够长 + 足够多单词 = 英文段落
         """
         if not text or len(text) < 15:
+            return False
+
+        if self._is_likely_spec_pseudo_code(text):
+            return False
+
+        if self._is_spec_inline_narrative(text):
             return False
 
         # 阶段 1: 排除——有代码特征的行不算正文
@@ -970,9 +1021,10 @@ def main():
     output_path.write_text(fixed_content, encoding='utf-8')
     print(f"\n输出文件: {output_path}")
 
-    # ---- 验证修复效果 ----
+    # ---- 验证修复效果（选项与首遍 analyze 一致，避免「修复后剩余」虚高） ----
     fixed_lines = fixed_content.split('\n')
     new_issues = analyzer.analyze(fixed_lines, {
+        'check_code_outside': args.check_code_outside,
         'check_indented_fences': args.fix_indent,
     })
 

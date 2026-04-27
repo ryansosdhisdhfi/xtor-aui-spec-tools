@@ -153,6 +153,54 @@ def _data_url_for_image(path: Path) -> str:
     return f"data:image/png;base64,{b64}"
 
 
+def _vlm_timeout_sec() -> float:
+    """单次 VLM 请求读超时（秒）；避免网关无响应时一直挂住。可调 AIDOC_VLM_TIMEOUT_SEC。"""
+    raw = (os.environ.get("AIDOC_VLM_TIMEOUT_SEC") or "600").strip()
+    try:
+        v = float(raw)
+    except ValueError:
+        return 600.0
+    return max(30.0, min(v, 7200.0))
+
+
+def _normalize_openai_base_url(base_url: str) -> str:
+    """OpenAI 兼容客户端的 base 须为 …/v1，与 aidoc 其它步一致。"""
+    bu = (base_url or "").strip().rstrip("/")
+    if not bu:
+        return bu
+    if bu.endswith("/v1"):
+        return bu
+    return f"{bu}/v1"
+
+
+def _strip_json_fences(text: str) -> str:
+    t = (text or "").strip()
+    if not t.startswith("```"):
+        return t
+    lines = t.split("\n")
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() in ("```", "```json"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _parse_model_json_text(raw: str) -> dict[str, Any]:
+    """从 assistant 正文中解出 JSON 对象；容忍 ``` 围栏与前后说明。"""
+    t = _strip_json_fences(raw)
+    try:
+        parsed: Any = json.loads(t)
+    except json.JSONDecodeError:
+        a = t.find("{")
+        b = t.rfind("}")
+        if a < 0 or b <= a:
+            raise
+        parsed = json.loads(t[a : b + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON root is not an object")
+    return parsed
+
+
 def run_figure_describe(
     image_path: Path,
     prompt: str,
@@ -161,32 +209,40 @@ def run_figure_describe(
     base_url: str,
     model: str,
 ) -> dict[str, Any]:
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    # 与 a2–a4 / aidoc_llm 一致：Chat Completions + vision（见 py/smoke_vision_api.py 最小验证）
+    bu = _normalize_openai_base_url(base_url)
+    if not bu:
+        raise ValueError("base_url 为空；请传与 API_URL 相同的根地址（含 /v1）")
+    client = OpenAI(api_key=api_key, base_url=bu, timeout=_vlm_timeout_sec())
     data_url = _data_url_for_image(image_path)
-    response = client.responses.create(
+    response = client.chat.completions.create(
         model=model,
-        input=[
+        max_tokens=4096,
+        messages=[
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": data_url},
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url},
+                    },
                 ],
             }
         ],
     )
-    # 部分网关/代理直接返回 str；标准 Responses 为带 output_text 的对象
-    if isinstance(response, str):
-        raw = response.strip()
-    else:
-        raw = (getattr(response, "output_text", None) or "").strip()
+    c0 = response.choices[0] if response.choices else None
+    msg = getattr(c0, "message", None) if c0 else None
+    raw = (getattr(msg, "content", None) or "").strip()
+    if not raw:
+        raise RuntimeError("Model returned empty message.content\nRaw: " + repr(response))
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        parsed = _parse_model_json_text(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise RuntimeError(
-            f"Model output is not valid JSON: {exc}\nRaw output:\n{raw}"
+            f"Model output is not valid JSON: {exc}\nRaw output:\n{raw[:8000]}"
         ) from exc
-    return normalize_unknowns(parsed if isinstance(parsed, dict) else {})
+    return normalize_unknowns(parsed)
 
 
 def default_api_key(explicit: str) -> str:

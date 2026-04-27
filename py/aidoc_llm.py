@@ -44,8 +44,8 @@ DEFAULT_MODEL_OLLAMA = "qwen3:8b"
 DEFAULT_MODEL_OPENAI = "gpt-4o-mini"
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_TIMEOUT = 120
-# OpenAI 兼容接口：遇 429 / 5xx / 524 等可重试错误时自动重试（可用环境变量关闭或调次数）
-DEFAULT_LLM_MAX_RETRIES = 3
+# OpenAI 兼容接口：遇 429 / 5xx / 524 等可重试错误时自动重试（见 AIDOC_LLM_MAX_RETRIES）
+DEFAULT_LLM_MAX_RETRIES = 8
 
 # 配置文件搜索路径
 CONFIG_SEARCH_PATHS = [
@@ -218,7 +218,7 @@ def _openai_max_retries() -> int:
         n = int(raw)
     except ValueError:
         return DEFAULT_LLM_MAX_RETRIES
-    return max(0, min(n, 20))
+    return max(0, min(n, 30))
 
 
 def _openai_transient_http_status(status: int) -> bool:
@@ -303,6 +303,18 @@ class OpenAIClient(LLMClient):
         if not self.api_key:
             print("警告: 未设置 OpenAI API Key")
             print("  请在 aidoc.conf 中设置 api_key，或设置环境变量 OPENAI_API_KEY")
+            self.available = False
+            return False
+
+        # HTTP 头须 latin-1；中文占位/全角符会在 urllib 里以 UnicodeEncodeError 失败
+        try:
+            self.api_key.encode("latin-1")
+        except UnicodeEncodeError:
+            print(
+                "错误: API_KEY 含非 ASCII 字符，无法作为 HTTP Authorization 发送。\n"
+                "  请检查本仓 **secrets.sh**（不是仅改 secrets.sh.example）中 export API_KEY=…\n"
+                "  须为英数字符的密钥，勿用中文占位（如「在此填写」）。"
+            )
             self.available = False
             return False
 
