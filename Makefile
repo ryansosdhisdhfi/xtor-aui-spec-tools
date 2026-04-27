@@ -1,5 +1,5 @@
 # XTOR 规范文档管线：在本目录放输入，在 output/ 落产物。
-# 使用前先 export REPO=/path/to/aidoc-toolchain（含 aidoc_*.py 与 .venv），见 README。
+# 使用前先 export REPO=…（工作目录+查找 .venv）；推荐: export REPO="$(pwd)"（本仓为根），见 README。
 #   cd /path/to/xtor-aui-spec-tools
 #   cp secrets.sh.example secrets.sh
 #   make check

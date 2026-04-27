@@ -1,54 +1,71 @@
 # xtor-aui-spec-tools
 
-**XTOR** 项目：面向规范文档的 **PDF → Markdown → 清洗 → 图语义链 → 索引** 管线。本仓库是**独立维护**的应用包：编排、脚本与配置都在这里，不依赖其它历史仓库路径。
+**XTOR** 项目：面向规范文档的 **PDF → Markdown → 清洗 → 图语义链 → 索引** 管线。本仓库是**独立**应用包：编排、`py/` 脚本与配置都在此；**不依赖**再下载另一份「历史大仓」才能跑主流程。
 
 ## 本仓库提供什么
 
 | 内容 | 说明 |
 |------|------|
 | `Makefile` | 串联 a1–a4（正文基线）与 b2–b7（图链 + 终稿索引） |
-| `py/` | 管线 Python 脚本（与上游 **Aidoc 工具链**同族，可随升级替换） |
-| `input/` | 放置待处理 PDF（见 `input/README.txt`） |
+| `py/` | 管线所需 Python 脚本；`make` 调用的就是这里的入口 |
+| `input/` | 待处理 PDF（见 `input/README.txt`） |
 | `output/`、`logs/` | 运行产物与日志（默认不入库） |
 
-## 运行依赖（必须）
+---
 
-执行 `make` 时，需要一个本机上的 **Aidoc 工具链根目录**（环境变量 **`REPO`**）：
+## 推荐：单仓闭环（clone → 装依赖 → 跑 `make`）
 
-- 该目录下应有：根级 `aidoc_*.py`、`rag_ingest.py`、`rag_full.py` 等，以及你在该目录创建的 **Python 虚拟环境**（推荐 `.venv`）。
-- `make` 会在 `REPO` 下作为工作目录调用解释器，脚本入口使用**本仓库**的 `py/`。
+**`REPO` 是 `make` 的工作目录，且默认在此目录下找 `.venv`。** 你完全可以把 **`REPO` 设成本仓库根目录**，只维护**这一份 Git**。
 
-**未设置 `REPO` 时**，`Makefile` 默认将 `REPO` 设为本目录的**上两级目录**（兼容「本仓与工具链根为兄弟目录」等布局）。**推荐**始终显式设置，避免歧义：
+在 **WSL** 或 **bash** 中：
 
 ```bash
-export REPO="/path/to/your/aidoc-toolchain-root"
-cd /path/to/xtor-aui-spec-tools
+git clone https://github.com/<你的用户名>/xtor-aui-spec-tools.git
+cd xtor-aui-spec-tools
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+cp secrets.sh.example secrets.sh
+# 编辑 secrets.sh：填写 API_URL（须含 /v1）、API_KEY、MODEL
+
+# 将 PDF 放入 input/，文件名与 Makefile 中 STEM 一致（默认见 input/README.txt）
+
+export REPO="$(pwd)"
 make check
+make all
 ```
 
-WSL 下路径示例：`export REPO="/mnt/c/Users/you/work/aidoc-toolchain"`。
+WSL 下若写绝对路径，例如：
 
-## 环境与快速开始（建议 WSL）
+`export REPO="/mnt/c/Users/你/桌面/xtor-aui-spec-tools"`
 
-1. 在 **Aidoc 工具链根** 创建 venv 并安装依赖（与本仓 `requirements.txt` 对齐即可）：
-   ```bash
-   cd "$REPO"
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r /path/to/xtor-aui-spec-tools/requirements.txt
-   ```
-2. 在本仓根目录：`cp secrets.sh.example secrets.sh`，填写 `API_URL`（须含 `/v1`）、`API_KEY`、`MODEL`。
-3. 将规范 PDF 放入 `input/`，文件名与 `Makefile` 中 `STEM` 一致（默认 `pcie61_ch2.pdf`）。
-4. `make check` → `make all`（或分步 `make a1-convert` 等）。
+**说明**：`make` 会 `cd` 到 `REPO`，再执行本仓 `py/` 中的脚本；**主流程不依赖** `REPO` 下是否还有**另一套** `aidoc_*.py` 副本——`py/` 里已经带了管线入口。
 
-GPU、OCR、可选环境变量见 `Makefile` 顶部注释。
+**未设置 `REPO` 时**，`Makefile` 会把 `REPO` 设成「本目录上溯两级」——这是给**旧式目录结构**的兼容。若本仓**单独**放在 `Desktop/xtor-aui-spec-tools` 这类路径，**默认往往不对**，请务必用上面的 **`export REPO="$(pwd)"`**（在**本仓根**执行时）。
+
+---
+
+## 可选：两种目录与另一套工具根（进阶）
+
+若团队**刻意**把 venv 与「别处的工具根」放在**兄弟目录**（例如大仓与 `xtor-aui-spec-tools` 同级），可令 **`REPO` 指向那棵根**，但仍用本仓的 `py/` 路径。此时在说明里**显式写出 `REPO` 的绝对路径**即可。
+
+常见场景：**RAG 向量化**要运行 `rag_ingest.py` / `rag_full.py` 时，若**本仓根下没有**这两份文件，可：
+
+- 从上游 **Aidoc 工具链** 拷贝到 `REPO` 根，或  
+- 在**另一已 clone 的仓库根** 设 `REPO` 并执行 `python rag_ingest.py`（`config` 里路径仍指**本仓** `output/`，见 [rag_config_pcie61_ch2.example.json](rag_config_pcie61_ch2.example.json)）。
+
+**仅跑 `make` 管线**（a1–b7）**不需要**上述两步。
+
+---
 
 ## 文档索引
 
 | 文档 | 内容 |
 |------|------|
-| [RUN_REPRO.md](RUN_REPRO.md) | 复现步骤、可选 RAG |
-| [REPO_SYNC.md](REPO_SYNC.md) | `py/` 与上游工具链脚本的维护说明 |
+| [RUN_REPRO.md](RUN_REPRO.md) | 与上文一致的复现、可选 RAG |
+| [REPO_SYNC.md](REPO_SYNC.md) | `py/` 与上游脚本的维护说明 |
 
 ## Makefile 目标摘要
 
@@ -61,8 +78,6 @@ GPU、OCR、可选环境变量见 `Makefile` 顶部注释。
 
 ## 无 `make` 时
 
-参考 `Makefile` 中的命令行，或阅读 `scripts/run_with_log.sh`，在 `REPO` 下用相同参数直接调用 `py/` 内脚本。
+参考 `Makefile` 中的命令行，或 `scripts/run_with_log.sh`，在**已 `export REPO` 且已 `activate` venv** 的前提下，以相同参数直接调用 `py/` 内脚本。
 
----
-
-**说明**：本 README 仅描述 **本 Git 仓库**。Aidoc 工具链根目录若由团队内部发布，请以你们实际路径与版本为准。
+GPU、OCR、可选环境变量见 `Makefile` 顶部注释。
