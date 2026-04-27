@@ -1,19 +1,19 @@
-# PCIe 6.1 Ch2 分片（part_003）管线：在「本目录」放输入，在 output/ 落产物。
-# 用法（在仓库根的上级，或本目录）:
-#   cd /path/to/ai-doctool2-master/user-run/pcie61_ch2_part003
-#   cp secrets.sh.example secrets.sh   # 填写 API
+# XTOR 规范文档管线：在本目录放输入，在 output/ 落产物。
+# 使用前先 export REPO=/path/to/aidoc-toolchain（含 aidoc_*.py 与 .venv），见 README。
+#   cd /path/to/xtor-aui-spec-tools
+#   cp secrets.sh.example secrets.sh
 #   make check
 #   make all
 #
-# 依赖：仓库根已建 Python 虚拟环境（见 README）；建议 WSL2 + bash。
+# 建议 WSL2 + bash；依赖见本目录 README 与 requirements.txt。
 # 每步通过 scripts/run_with_log.sh 写入 logs/（含时间戳、完整命令、退出码、耗时）。
 
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 PART   := $(abspath .)
-# 默认同目录位于「主仓库根/user-run/pcie61_ch2_part003」时，上溯两级 = 主仓库根。
-# 若本包单独 clone 到任意路径，先在本机准备主仓库，再: REPO=/path/to/ai-doctool2-master make all
+# 未设置环境变量 REPO 时，默认上溯两级 = Aidoc 工具链根（与「本仓与 REPO 为兄弟目录」等布局一致）。
+# 更稳妥：REPO=/path/to/aidoc-toolchain make all
 ifeq ($(origin REPO), undefined)
   REPO := $(abspath $(PART)/../..)
 else

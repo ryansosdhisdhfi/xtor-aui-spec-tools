@@ -1,5 +1,5 @@
-# 与仓库根 requirements.txt 对齐的最小集；在仓库根 venv 中:
-#   pip install -r user-run/pcie61_ch2_part003/requirements.txt
+# 与 Aidoc 工具链 venv 对齐的最小集，例如:
+#   pip install -r /path/to/xtor-aui-spec-tools/requirements.txt
 #
 requests>=2.28.0
 pyyaml>=6.0
