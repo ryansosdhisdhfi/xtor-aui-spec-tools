@@ -1,0 +1,7 @@
+secrets.sh
+output/
+logs/
+# 从 rag_config_pcie61_ch2.example.json 复制并可能含本机 LLM/路径
+rag_config_pcie61_ch2.json
+# 本地 Chroma
+rag_data/

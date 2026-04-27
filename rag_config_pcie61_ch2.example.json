@@ -1,0 +1,25 @@
+{
+  "_comment": "复制为 rag_config_pcie61_ch2.json 后按需改路径。在仓库根执行 rag_ingest / rag_full。",
+  "embedding": {
+    "api": "local",
+    "model": "BAAI/bge-small-en-v1.5"
+  },
+  "llm": {
+    "api": "ollama",
+    "api_url": "http://localhost:11434",
+    "model": "qwen3:8b",
+    "api_key": "",
+    "temperature": 0.3
+  },
+  "data": {
+    "index_path": "user-run/pcie61_ch2_part003/output/pcie61_ch2_enriched.index.json",
+    "doc_path": "user-run/pcie61_ch2_part003/output/pcie61_ch2_enriched.md",
+    "chroma_dir": "user-run/pcie61_ch2_part003/rag_data"
+  },
+  "search": {
+    "top_k": 5,
+    "vector_weight": 0.6,
+    "keyword_weight": 0.4,
+    "max_context_lines": 200
+  }
+}

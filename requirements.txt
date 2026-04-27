@@ -1,0 +1,12 @@
+# 与仓库根 requirements.txt 对齐的最小集；在仓库根 venv 中:
+#   pip install -r user-run/pcie61_ch2_part003/requirements.txt
+#
+requests>=2.28.0
+pyyaml>=6.0
+pypdf>=4.0
+docling>=2.0.0
+docling-core>=2.0.0
+pymupdf>=1.24.0
+# 图内 OCR（可选 B4，且需本机 Tesseract + 语言包）
+pytesseract>=0.3.10
+Pillow>=10.0.0
