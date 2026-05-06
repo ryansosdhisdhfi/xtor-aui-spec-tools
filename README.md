@@ -37,7 +37,8 @@ PDF ──► Docling(a1) ──► Markdown + 配图
 ## 环境与快速开始（WSL / Bash）
 
 ```bash
-git clone <本仓库 HTTPS 或 SSH>
+git clone https://github.com/ryansosdhisdhfi/xtor-aui-spec-tools.git
+# 或 SSH: git clone git@github.com:ryansosdhisdhfi/xtor-aui-spec-tools.git
 cd xtor-aui-spec-tools
 
 python3 -m venv .venv
