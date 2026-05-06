@@ -644,6 +644,120 @@ def get_conversion_stats(result: ConversionResult) -> dict:
 # CLI 入口
 # =============================================================================
 
+def add_standard_convert_options(parser: argparse.ArgumentParser) -> None:
+    """单文件与批量入口共用的 Docling/后处理参数（不含 input/output 位置参数）。"""
+    parser.add_argument("--no-code-enrichment", action="store_true",
+                        help="禁用代码块识别增强")
+    parser.add_argument("--no-formula-enrichment", action="store_true",
+                        help="禁用公式 LaTeX 转换")
+    parser.add_argument("--no-picture-classification", action="store_true",
+                        help="禁用图片分类")
+    parser.add_argument("--picture-description", action="store_true",
+                        help="启用图片描述生成 (需要 VLM)")
+    parser.add_argument("--no-ocr", action="store_true",
+                        help="禁用 OCR")
+    parser.add_argument("--no-merge-code", action="store_true",
+                        help="禁用连续代码块合并 (跨页代码修复)")
+    parser.add_argument("--keep-headers-footers", action="store_true",
+                        help="保留页眉页脚 (默认过滤)")
+    parser.add_argument("--ocr-lang", default="ch_sim,en",
+                        help="OCR 语言列表，逗号分隔 (默认: ch_sim,en)")
+    parser.add_argument("--table-mode", choices=["accurate", "fast"],
+                        default="accurate",
+                        help="表格识别模式 (默认: accurate)")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"],
+                        default="cpu",
+                        help="计算设备 (默认: cpu)")
+    parser.add_argument("--image-mode", choices=["embedded", "placeholder", "referenced"],
+                        default="referenced",
+                        help="图片模式 (默认: referenced)")
+    parser.add_argument("--images-scale", type=float, default=4.0,
+                        help="导出图片缩放因子，1.0=72DPI，2.0=144DPI，4.0=288DPI (默认: 4.0)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="详细输出")
+    parser.add_argument("--stats", action="store_true",
+                        help="显示转换统计信息")
+    parser.add_argument("--progress-interval", type=int, default=20,
+                        help="转换阶段心跳进度打印间隔（秒，0=关闭，默认: 20）")
+
+
+def docling_converter_from_args(args: argparse.Namespace) -> DoclingPdfConverter:
+    """由 CLI 参数构造转换器（模型只加载一次时可复用同一实例）。"""
+    ocr_languages = [lang.strip() for lang in args.ocr_lang.split(",")]
+    return DoclingPdfConverter(
+        enable_code_enrichment=not args.no_code_enrichment,
+        enable_formula_enrichment=not args.no_formula_enrichment,
+        enable_picture_classification=not args.no_picture_classification,
+        enable_picture_description=args.picture_description,
+        enable_ocr=not args.no_ocr,
+        ocr_languages=ocr_languages,
+        table_mode=args.table_mode,
+        device=args.device,
+        verbose=args.verbose,
+        progress_interval=args.progress_interval,
+        images_scale=args.images_scale,
+    )
+
+
+def convert_one_pdf(
+    converter: DoclingPdfConverter,
+    input_path: Path,
+    output_path: Path,
+    args: argparse.Namespace,
+    *,
+    print_header: bool = True,
+) -> float:
+    """
+    对单份 PDF 执行与 main() 相同的转换与后处理；不创建新的 DoclingPdfConverter。
+    返回耗时（秒）。
+    """
+    start_time = time.time()
+    result = converter.convert(str(input_path))
+
+    if args.stats or args.verbose:
+        print_stats(get_conversion_stats(result), title="转换统计")
+
+    markdown = converter.save_markdown_with_assets(
+        result,
+        str(output_path),
+        filter_headers_footers=not args.keep_headers_footers,
+        image_mode=args.image_mode,
+    )
+
+    if not args.keep_headers_footers:
+        if args.verbose:
+            print("\n执行增强页眉页脚检测...")
+        hf_texts = detect_headers_footers_by_position(result, verbose=args.verbose)
+        if hf_texts:
+            markdown, removed_count = filter_headers_footers_from_markdown(markdown, hf_texts)
+            if args.verbose or args.stats:
+                print(f"增强过滤移除了 {removed_count} 行页眉页脚")
+
+    if not args.no_merge_code:
+        original_len = len(markdown)
+        markdown = merge_consecutive_code_blocks(markdown)
+        if args.verbose and len(markdown) != original_len:
+            print("已合并跨页代码块")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(markdown)
+
+    converter.export_image_index(result, str(output_path))
+
+    elapsed = time.time() - start_time
+    if print_header:
+        print_stats(
+            {
+                "耗时": f"{elapsed:.1f}s",
+                "输出": str(output_path),
+                "大小": f"{output_path.stat().st_size / 1024:.1f} KB",
+            },
+            title="转换完成",
+        )
+    return elapsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建命令行参数解析器"""
     parser = argparse.ArgumentParser(
@@ -672,53 +786,14 @@ def build_parser() -> argparse.ArgumentParser:
   # GPU 加速
   %(prog)s document.pdf --device cuda
 
-  # 批量处理
-  for f in *.pdf; do %(prog)s "$f"; done
+  # 多段 PDF 单次加载模型批量转换
+  python3 aidoc_convert_assets_batch.py --manifest input/book_parts_manifest.json
         """
     )
 
-    # 输入输出
     parser.add_argument("input", help="输入 PDF 文件路径")
     parser.add_argument("-o", "--output", help="输出 Markdown 文件路径 (默认: <input>.md)")
-
-    # 功能开关
-    parser.add_argument("--no-code-enrichment", action="store_true",
-                        help="禁用代码块识别增强")
-    parser.add_argument("--no-formula-enrichment", action="store_true",
-                        help="禁用公式 LaTeX 转换")
-    parser.add_argument("--no-picture-classification", action="store_true",
-                        help="禁用图片分类")
-    parser.add_argument("--picture-description", action="store_true",
-                        help="启用图片描述生成 (需要 VLM)")
-    parser.add_argument("--no-ocr", action="store_true",
-                        help="禁用 OCR")
-    parser.add_argument("--no-merge-code", action="store_true",
-                        help="禁用连续代码块合并 (跨页代码修复)")
-    parser.add_argument("--keep-headers-footers", action="store_true",
-                        help="保留页眉页脚 (默认过滤)")
-
-    # 配置选项
-    parser.add_argument("--ocr-lang", default="ch_sim,en",
-                        help="OCR 语言列表，逗号分隔 (默认: ch_sim,en)")
-    parser.add_argument("--table-mode", choices=["accurate", "fast"],
-                        default="accurate",
-                        help="表格识别模式 (默认: accurate)")
-    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"],
-                        default="cpu",
-                        help="计算设备 (默认: cpu)")
-    parser.add_argument("--image-mode", choices=["embedded", "placeholder", "referenced"],
-                        default="referenced",
-                        help="图片模式 (默认: referenced)")
-    parser.add_argument("--images-scale", type=float, default=4.0,
-                        help="导出图片缩放因子，1.0=72DPI，2.0=144DPI，4.0=288DPI (默认: 4.0)")
-
-    # 其他
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="详细输出")
-    parser.add_argument("--stats", action="store_true",
-                        help="显示转换统计信息")
-    parser.add_argument("--progress-interval", type=int, default=20,
-                        help="转换阶段心跳进度打印间隔（秒，0=关闭，默认: 20）")
+    add_standard_convert_options(parser)
 
     return parser
 
@@ -727,7 +802,6 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # 验证输入文件
     input_path = Path(args.input)
     if not input_path.exists():
         print(f"错误: 文件不存在 - {input_path}")
@@ -737,85 +811,16 @@ def main():
         print(f"警告: 文件可能不是 PDF - {input_path}")
 
     output_path = Path(args.output) if args.output else input_path.with_suffix(".md")
-    ocr_languages = [lang.strip() for lang in args.ocr_lang.split(",")]
 
-    # 打印运行信息
     print_banner("aidoc_convert - PDF 转 Markdown 工具")
     print(f"输入文件: {input_path}")
     print(f"输出文件: {output_path}")
     print()
 
     try:
-        # 初始化转换器
-        converter = DoclingPdfConverter(
-            enable_code_enrichment=not args.no_code_enrichment,
-            enable_formula_enrichment=not args.no_formula_enrichment,
-            enable_picture_classification=not args.no_picture_classification,
-            enable_picture_description=args.picture_description,
-            enable_ocr=not args.no_ocr,
-            ocr_languages=ocr_languages,
-            table_mode=args.table_mode,
-            device=args.device,
-            verbose=args.verbose,
-            progress_interval=args.progress_interval,
-            images_scale=args.images_scale,
-        )
-
+        converter = docling_converter_from_args(args)
         print("开始转换...")
-        start_time = time.time()
-
-        # 第一步: Docling 解析
-        result = converter.convert(str(input_path))
-
-        # 显示统计
-        if args.stats or args.verbose:
-            stats = get_conversion_stats(result)
-            print_stats(stats, title="转换统计")
-
-        # 第二步: 用 Docling 原生方式导出 Markdown+图片资源，再进行项目后处理
-        markdown = converter.save_markdown_with_assets(
-            result,
-            str(output_path),
-            filter_headers_footers=not args.keep_headers_footers,
-            image_mode=args.image_mode,
-        )
-
-        # 第三步: 增强页眉页脚过滤（基于位置+重复，补充 Docling 内置过滤的不足）
-        if not args.keep_headers_footers:
-            if args.verbose:
-                print("\n执行增强页眉页脚检测...")
-            hf_texts = detect_headers_footers_by_position(result, verbose=args.verbose)
-            if hf_texts:
-                markdown, removed_count = filter_headers_footers_from_markdown(markdown, hf_texts)
-                if args.verbose or args.stats:
-                    print(f"增强过滤移除了 {removed_count} 行页眉页脚")
-
-        # 第四步: 合并跨页代码块
-        if not args.no_merge_code:
-            original_len = len(markdown)
-            markdown = merge_consecutive_code_blocks(markdown)
-            if args.verbose and len(markdown) != original_len:
-                print("已合并跨页代码块")
-
-        # 保存结果
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(markdown)
-
-        # 第五步: 导出图片索引与图片文件（独立于 Markdown 资源引用，便于后续 OCR/VLM）
-        converter.export_image_index(result, str(output_path))
-
-        elapsed = time.time() - start_time
-
-        print_stats(
-            {
-                "耗时": f"{elapsed:.1f}s",
-                "输出": str(output_path),
-                "大小": f"{output_path.stat().st_size / 1024:.1f} KB",
-            },
-            title="转换完成",
-        )
-
+        convert_one_pdf(converter, input_path, output_path, args, print_header=True)
     except Exception as e:
         print(f"\n错误: 转换失败 - {e}")
         if args.verbose:

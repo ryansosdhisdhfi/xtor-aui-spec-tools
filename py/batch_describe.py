@@ -42,6 +42,18 @@ def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _image_path_relative_to_output(image_file: Path, output_dir: Path) -> str:
+    """
+    磁盘上的绝对路径 -> 相对 output/（即 filter_images 的 filtered-json 所在目录）的 POSIX 路径，
+    与合并后 *_merged_images/ 的布局一致，便于搬迁工程目录。
+    """
+    try:
+        rel = image_file.resolve().relative_to(output_dir.resolve())
+        return rel.as_posix()
+    except (ValueError, OSError):
+        return str(image_file)
+
+
 def build_document_context(
     fig: dict[str, Any] | None,
     max_chars: int,
@@ -128,6 +140,8 @@ def main() -> int:
         return 1
 
     filtered_path = Path(args.filtered_json).resolve()
+    # 与 Makefile 约定一致：*.images.filtered.json 位于 output/ 根目录
+    output_dir = filtered_path.parent
     data = load_json(filtered_path)
     kept: list[dict[str, Any]] = data.get("kept") or []
     if not kept:
@@ -202,6 +216,7 @@ def main() -> int:
                 print(f"    x 文件不存在: {image_path}", flush=True)
             continue
         bn = image_path.name
+        image_path_rel = _image_path_relative_to_output(image_path, output_dir)
 
         out_file = out_dir / f"{iid}.json"
         if args.skip_existing and out_file.is_file():
@@ -212,6 +227,14 @@ def main() -> int:
                         print(f"skip existing {out_file.name}")
                     if show_progress:
                         print("    o 已存在，跳过 VLM", flush=True)
+                    prev["image_path"] = image_path_rel
+                    try:
+                        out_file.write_text(
+                            json.dumps(prev, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8",
+                        )
+                    except OSError:
+                        pass
                     report_items.append(
                         {
                             "image_id": iid,
@@ -259,7 +282,7 @@ def main() -> int:
             section=section,
             image_type=args.image_type,
             ocr_text=ocr_text,
-            image_path=str(image_path),
+            image_path=image_path_rel,
             document_context=document_context,
         )
         prompt = build_prompt(meta)
@@ -295,6 +318,7 @@ def main() -> int:
                 print(f"FAIL {iid}: {e}", file=sys.stderr)
             continue
         dt = time.time() - t0
+        result_json["image_path"] = image_path_rel
         out_file.write_text(
             json.dumps(result_json, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",

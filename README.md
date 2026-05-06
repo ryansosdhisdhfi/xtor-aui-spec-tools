@@ -1,74 +1,109 @@
 # xtor-aui-spec-tools
 
-**XTOR** 项目：面向规范文档的 **PDF → Markdown → 清洗 → 图语义链 → 索引** 管线。本仓库是**独立**应用包：编排、`py/` 脚本与配置都在此；**不依赖**再下载另一份「历史大仓」才能跑主流程。
-
-## 本仓库提供什么
-
-| 内容 | 说明 |
-|------|------|
-| `Makefile` | 串联 a1–a4（正文基线）与 b1–b7（图链相对化 + 终稿索引） |
-| `py/` | 管线所需 Python 脚本；`make` 调用的就是这里的入口 |
-| `input/` | 待处理 PDF（见 `input/README.txt`） |
-| `output/`、`logs/` | 运行产物与日志（默认不入库） |
-| `archive/` | **本地备份目录**（`backup_output_logs.sh` 将旧 `output/`、`logs/` 移入此下）；**全量重跑前清理时勿删**，除非你主动要腾空间。 |
-
-**重跑前清理约定**：只清空或替换 `output/` 与 `logs/`；`archive/` 保留。可用 `bash scripts/backup_output_logs.sh` 先备份再跑 `make all`。
+面向 **工业规格书（SPEC）等大 PDF** 的 **离线批处理工具链**：在本地/WSL 将 PDF 转成可维护的 Markdown、规整图片与语义描述，并生成 **RAG/检索可用的索引 JSON**。本仓库是**独立**应用包：**`Makefile`** 编排、**`py/`** 内含全部入口脚本，可按 README 一键复现主干流程，无需再克隆另一棵「历史大仓」。
 
 ---
 
-## 推荐：单仓闭环（clone → 装依赖 → 跑 `make`）
+## 能力与产出（一句话版图）
 
-**`REPO` 是 `make` 的工作目录，且默认在此目录下找 `.venv`。** 你完全可以把 **`REPO` 设成本仓库根目录**，只维护**这一份 Git**。
+```
+PDF ──► Docling(a1) ──► Markdown + 配图
+           │
+           ├─► A 段：页眉剥离、标题层级修复、代码块整理（LLM）
+           └─► B 段：图链相对化 → 筛图/OCR/VLM → 注入 enriched MD → H4+H2 双份索引 JSON
+```
 
-在 **WSL** 或 **bash** 中：
+| 产出位置 | 说明 |
+|----------|------|
+| `output/`（默认不进 Git） | `*_clean.md`、`*_enriched.md`、合并图目录、`figure_schemas/*.json`、`*_enriched.index.h4.json` / `.h2.json` 等 |
+| `logs/` | `pipeline.log`、`run_*_<步骤>.log`、时间与命令摘要 |
+
+**`make b-all`** 结尾为 **`b7-index-dual`**：对同一份 **`$(STEM)_enriched.md`** 依次生成 **细粒度（H4）** 与 **粗粒度（H2）** 两套索引。
+
+---
+
+## 目录结构
+
+| 路径 | 作用 |
+|------|------|
+| `Makefile` | `a*` / `b*` 管线入口；`pdf-split`、`a1-batch`、`merge-*` 等大 PDF 分段与合并 |
+| `py/` | `aidoc_index.py`、`batch_describe.py`、`merge_split_md.py`、`split_pdf_for_a1.py` 等脚本 |
+| `scripts/` | `run_with_log.sh`、`backup_output_logs.sh`、`run_a*_detached.sh`、`*.ps1` 辅助 |
+| `input/` | 放置 **`$(STEM).pdf`**（大文件见 `.gitignore`）；`README.txt` 命名约定 |
+| `archive/` | 本地快照： **`scripts/backup_output_logs.sh`** 将整棵 `output/`、`logs/` 按时间戳移入（勿当垃圾删） |
+
+---
+
+## 环境与快速开始（WSL / Bash）
 
 ```bash
-git clone https://github.com/<你的用户名>/xtor-aui-spec-tools.git
+git clone <本仓库 HTTPS 或 SSH>
 cd xtor-aui-spec-tools
 
 python3 -m venv .venv
 source .venv/bin/activate
-# 建议加 -v：安装阶段会持续输出，便于区分「慢」与「卡死」（大 torch/nvidia 包在 /mnt/c 上可能仍要很久）
 pip install -r requirements.txt -v --default-timeout=1000
 
 cp secrets.sh.example secrets.sh
-# 编辑 secrets.sh：填写 API_URL（须含 /v1）、API_KEY、MODEL
-
-# 将 PDF 放入 input/，文件名与 Makefile 中 STEM 一致（默认见 input/README.txt）
+# 填写 API_URL（须含 /v1）、API_KEY、MODEL（及 B 段可用的 BATCH_BASE_URL 等按需）
 
 export REPO="$(pwd)"
-make check
-make all
+export STEM=你的书名前缀无空格   # 与 input/<STEM>.pdf 同名
+make check STEM="$STEM"
 ```
 
-WSL 下若写绝对路径，例如：
+- **单独放本仓库在桌面等路径时，务必 **`export REPO="$(pwd)"`**；未设置时 Makefile 可能对旧目录结构的兼容默认值不符合你的布局。**
 
-`export REPO="/mnt/c/Users/你/桌面/xtor-aui-spec-tools"`
+### 大 PDF（推荐拆分）
 
-**说明**：`make` 会 `cd` 到 `REPO`，再执行本仓 `py/` 中的脚本；**主流程不依赖** `REPO` 下是否还有**另一套** `aidoc_*.py` 副本——`py/` 里已经带了管线入口。
+依赖系统 **`qpdf`**（如 `sudo apt install qpdf`）。
 
-**未设置 `REPO` 时**，`Makefile` 会把 `REPO` 设成「本目录上溯两级」——这是给**旧式目录结构**的兼容。若本仓**单独**放在 `Desktop/xtor-aui-spec-tools` 这类路径，**默认往往不对**，请务必用上面的 **`export REPO="$(pwd)"`**（在**本仓根**执行时）。
+```bash
+make pdf-split STEM="$STEM"
+make a1-batch STEM="$STEM"          # 可 A1_START_INDEX / A1_SKIP_EXISTING 续跑
+make merge-parts-full STEM="$STEM"
 
-### 长时间安装 / 跑管线时怎么知道「还在跑」
+# Makefile 约定：a2 入参为 $(STEM).md——合并后请先对齐主文件名与 images.json
+cp "output/${STEM}_merged.md" "output/${STEM}.md"
+cp "output/${STEM}_merged.images.json" "output/${STEM}.images.json"
 
-| 场景 | 建议 |
-|------|------|
-| **`pip install` 很久没新行** | 使用 **`-v`**（或 **`-vv`** 更细）：安装阶段会陆续打印处理过程，比默认静默好判断。例：`pip install -r requirements.txt -v --default-timeout=1000`。下载进度条若被关掉，可设 `export PIP_PROGRESS_BAR=on`（视 pip 版本而定）。 |
-| **`make` 某一步不知是否挂住** | 另开终端 **`tail -f logs/pipeline.log`** 或 **`ls -lt logs/run_*.log | head -1`** 看最新日志是否还在增长。`make` 每步都会往 `logs/` 写。 |
-| **venv 在 `/mnt/c/...` 上** | 装大 GPU 包时解压写盘会**特别慢**，属正常现象；若可接受，把项目放到 WSL 家目录（如 `~/work/...`）会快一些。 |
+make a2-strip a3-hierarchy a4-codeblocks STEM="$STEM"
+make b-all STEM="$STEM"
+```
+
+### 小 PDF（整本一次 a1）
+
+```bash
+make a1-convert STEM="$STEM"
+make a-all b-all STEM="$STEM"       # 或分步调用，见下文
+```
 
 ---
 
-## 可选：两种目录与另一套工具根（进阶）
+## 常用 `make` 目标
 
-若团队**刻意**把 venv 与「别处的工具根」放在**兄弟目录**（例如大仓与 `xtor-aui-spec-tools` 同级），可令 **`REPO` 指向那棵根**，但仍用本仓的 `py/` 路径。此时在说明里**显式写出 `REPO` 的绝对路径**即可。
+| 目标 | 含义 |
+|------|------|
+| `check` | 校验 `secrets.sh`、`input/$(STEM).pdf` 等 |
+| `a-all` | `a1-convert`（整本路径）→ `a2`～`a4`；拆分场景下请按需用手动 `cp` + `make a2-strip`… |
+| `b-all` | `b1`～`b6` → **`b7-index-dual`（H4 + H2 索引）** |
+| `b7-index`、`b7-index-h1`、`b7-index-h2` | 单份索引可调深度 |
+| `a34-detached`、`run_a*_detached.sh` | 长任务后台/nohup 示例 |
 
-常见场景：**RAG 向量化**要运行 `rag_ingest.py` / `rag_full.py` 时，若**本仓根下没有**这两份文件，可：
+更多变量（`FAST_A1`、`IMAGES_SCALE`、`AIDOC_LLM_MAX_RETRIES`、`AIDOC_INDEX_MAX_CHUNK_CHARS`、`INDEX_DEPTH` 等）见 **`Makefile` 顶部注释**。
 
-- 从上游 **Aidoc 工具链** 拷贝到 `REPO` 根，或  
-- 在**另一已 clone 的仓库根** 设 `REPO` 并执行 `python rag_ingest.py`（`config` 里路径仍指**本仓** `output/`，见 [rag_config_pcie61_ch2.example.json](rag_config_pcie61_ch2.example.json)）。
+---
 
-**仅跑 `make` 管线**（a1–b7）**不需要**上述两步。
+## Shell 与本机路径约定
+
+- **在 WSL 中执行 **`*.sh`** 须为 LF 换行**；若有 `set: pipefail` 一类乱码报错，在项目根运行 **`python3 scripts/_fix_sh_lf.py`**。
+- **`scripts/backup_output_logs.sh`**：整包备份 **`output`** + **`logs`** 至 **`archive/`**，并新建空目录，便于新书 **`STEM`** 下一轮全流程。
+
+---
+
+## B5 图描述 JSON 路径
+
+**`figure_schemas/*.json`** 中的 **`image_path`** 新版本写为 **相对 `output/` 根目录的路径**（与 `*_merged_images/` 一致），便于换机或与 `archive` 一并搬迁；历史存档可用 **`python3 py/fix_figure_schemas_image_path.py`** 批量规范化。
 
 ---
 
@@ -76,22 +111,13 @@ WSL 下若写绝对路径，例如：
 
 | 文档 | 内容 |
 |------|------|
-| [RUN_REPRO.md](RUN_REPRO.md) | 与上文一致的复现、可选 RAG |
-| [REPO_SYNC.md](REPO_SYNC.md) | `py/` 与上游脚本的维护说明 |
-| [runs/BACKLOG.md](runs/BACKLOG.md) | 规划中的增强（如超大 PDF 全自动分片合并） |
-| [runs/IMAGE_NAMING.md](runs/IMAGE_NAMING.md) | 图：MD 路径、`fig_`、JSON 如何**按顺序**一一对应 |
+| [RUN_REPRO.md](RUN_REPRO.md) | 复现说明、可选 RAG |
+| [REPO_SYNC.md](REPO_SYNC.md) | 与上游 `py/` 脚本的同步说明 |
+| [runs/BACKLOG.md](runs/BACKLOG.md) | 规划与待增强 |
+| [runs/IMAGE_NAMING.md](runs/IMAGE_NAMING.md) | 图链、`fig_`、`images.json` 对应关系 |
 
-## Makefile 目标摘要
+---
 
-| 目标 | 含义 |
-|------|------|
-| `a1-convert` … `a4-codeblocks` | PDF → 清洗与结构修复 |
-| `a5-index` | 首次索引（可选） |
-| `b1` … `b7` | 图链相对化、筛图/上下文、OCR、VLM 注入、终稿索引 |
-| `all` | `a-all` + `b-all` |
+## License / 致谢
 
-## 无 `make` 时
-
-参考 `Makefile` 中的命令行，或 `scripts/run_with_log.sh`，在**已 `export REPO` 且已 `activate` venv** 的前提下，以相同参数直接调用 `py/` 内脚本。
-
-GPU、OCR、可选环境变量见 `Makefile` 顶部注释。
+本项目所用 PDF 示例与第三方模型/API 由各使用者自行合规取得与配置。

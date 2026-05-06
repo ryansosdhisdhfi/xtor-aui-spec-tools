@@ -13,3 +13,7 @@ __pycache__/
 rag_config_pcie61_ch2.json
 # 本地 Chroma
 rag_data/
+# 本地打包/误入仓的冗余
+archive.zip
+/output - 副本/
+/logs - 副本/
