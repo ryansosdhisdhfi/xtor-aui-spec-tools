@@ -114,7 +114,6 @@ make a-all b-all STEM="$STEM"       # 或分步调用，见下文
 |------|------|
 | [RUN_REPRO.md](RUN_REPRO.md) | 复现说明、可选 RAG |
 | [REPO_SYNC.md](REPO_SYNC.md) | 与上游 `py/` 脚本的同步说明 |
-| [runs/BACKLOG.md](runs/BACKLOG.md) | 规划与待增强 |
 | [runs/IMAGE_NAMING.md](runs/IMAGE_NAMING.md) | 图链、`fig_`、`images.json` 对应关系 |
 
 ---
