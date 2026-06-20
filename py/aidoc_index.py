@@ -16,6 +16,7 @@ aidoc_index.py - RAG 语义索引工具
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -52,6 +53,13 @@ DEPTH_CONFIG = {
     "large": 2,     # 大文件：切到 H2
 }
 
+# b7 摘要角色说明。系统提示保持最短，完整约束写入 user prompt。
+INDEX_SUMMARY_ROLE = (
+    "You are a document analysis assistant. "
+    "Return JSON only. "
+    "The summary and keywords must be in English."
+)
+INDEX_SUMMARY_SYSTEM = "Return JSON only. Use English for summary and keywords."
 
 # =============================================================================
 # 数据结构
@@ -203,6 +211,10 @@ def _normalize_summary_payload(data: dict) -> tuple[str, list[str]]:
     return summary, keywords
 
 
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
 def _summary_input_char_limit() -> Optional[int]:
     """
     摘要输入正文长度上限（字符）。默认不截断，整段 chunk 交给 LLM。
@@ -216,6 +228,74 @@ def _summary_input_char_limit() -> Optional[int]:
     except ValueError:
         return None
     return n if n > 0 else None
+
+
+def _strip_figure_enrich_blocks(content: str) -> str:
+    """索引摘要不需要 VLM 注入块；去掉可显著缩小 enriched 章节。"""
+    return re.sub(
+        r"<!--\s*figure-enrich[^>]*-->.*?<!--\s*/figure-enrich\s*-->",
+        "",
+        content,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+
+def _auto_summary_char_limit(content_len: int) -> Optional[int]:
+    """未设 AIDOC_INDEX_MAX_CHUNK_CHARS 时，对超大节自动截断，降低 400。"""
+    explicit = _summary_input_char_limit()
+    if explicit is not None:
+        return explicit
+    if content_len > 200_000:
+        return 120_000
+    if content_len > 80_000:
+        return 80_000
+    if content_len > 40_000:
+        return 50_000
+    return None
+
+
+# 失败后逐级缩短正文再试（须递减；可按需 export AIDOC_INDEX_MAX_CHUNK_CHARS 覆盖首档）
+_SUMMARY_RETRY_FALLBACKS = (80_000, 50_000, 30_000, 15_000, 8_000)
+
+
+def _truncate_for_summary(content: str, limit: Optional[int]) -> str:
+    if limit is None or len(content) <= limit:
+        return content
+    return content[:limit] + "\n...[truncated for index summary]"
+
+
+def _title_fallback_summary(title: str) -> tuple[str, list[str]]:
+    """正文过短（如 Preface 仅标题）时用标题作摘要，不再调 LLM。"""
+    t = (title or "").strip()
+    if not t:
+        return "", []
+    words = [w for w in re.sub(r"[^\w\s-]", " ", t).split() if w][:5]
+    return t[:100], words[:5] if words else [t[:40]]
+
+
+def _summary_retry_limits(content_len: int) -> list[Optional[int]]:
+    """先试自动/显式上限，失败后逐步缩短正文再试。"""
+    primary = _auto_summary_char_limit(content_len)
+    limits: list[Optional[int]] = []
+    if primary is not None:
+        limits.append(primary)
+    elif content_len > 15_000:
+        limits.append(15_000)
+    else:
+        limits.append(None)
+    for fallback in _SUMMARY_RETRY_FALLBACKS:
+        if primary is not None and fallback < primary:
+            limits.append(fallback)
+        elif primary is None and content_len > fallback:
+            limits.append(fallback)
+    # 去重保序
+    seen: set[Optional[int]] = set()
+    out: list[Optional[int]] = []
+    for lim in limits:
+        if lim not in seen:
+            seen.add(lim)
+            out.append(lim)
+    return out
 
 
 def summarize_chunk(
@@ -235,38 +315,57 @@ def summarize_chunk(
     Returns:
         (摘要文本, 关键字列表)；内容过短或调用失败时返回 ("", [])
     """
+    content = _strip_figure_enrich_blocks(content)
     if len(content.strip()) < 50:
-        return "", []
+        return _title_fallback_summary(title)
 
-    lim = _summary_input_char_limit()
-    if lim is not None and len(content) > lim:
-        content = content[:lim] + "\n...[truncated: AIDOC_INDEX_MAX_CHUNK_CHARS]"
-
-    prompt = f"""请分析以下章节内容，生成简洁的摘要和关键字。
-
-章节标题: {title}
-
-章节内容:
-{content}
-
-请按以下 JSON 格式输出（只输出JSON，不要其他内容）:
-{{
-    "summary": "一句话摘要（50字以内）",
-    "keywords": ["关键字1", "关键字2", "关键字3"]
-}}
-"""
-    system = "你是一个文档分析助手，擅长提取文档的核心内容和关键信息。只输出JSON格式，不要输出其他解释。"
+    limits = _summary_retry_limits(len(content))
+    system = INDEX_SUMMARY_SYSTEM
 
     last_response = ""
-    for attempt in range(max_attempts):
-        temp = 0.15 if attempt == 0 else 0.25 + 0.05 * attempt
-        response = llm.generate(prompt, system, temperature=min(temp, 0.5))
-        last_response = response or ""
-        data = extract_json(last_response)
-        if data and isinstance(data, dict):
-            summary, keywords = _normalize_summary_payload(data)
-            if summary:
-                return summary, keywords
+    for lim in limits:
+        piece = _truncate_for_summary(content, lim)
+        prompt = f"""{INDEX_SUMMARY_ROLE}
+
+Analyze the following section and produce a concise summary and keywords.
+
+Requirements:
+- summary must be in English
+- keywords must be in English
+- keep summary to one short sentence, ideally under 25 words
+- return JSON only
+
+Section title: {title}
+
+Section content:
+{piece}
+
+Return exactly this JSON shape:
+{{
+    "summary": "one-sentence English summary",
+    "keywords": ["english_keyword_1", "english_keyword_2", "english_keyword_3"]
+}}
+"""
+        for attempt in range(max_attempts):
+            temp = 0.15 if attempt == 0 else 0.25 + 0.05 * attempt
+            response = llm.generate(prompt, system, temperature=min(temp, 0.5))
+            last_response = response or ""
+            data = extract_json(last_response)
+            if data and isinstance(data, dict):
+                summary, keywords = _normalize_summary_payload(data)
+                if summary and not _contains_cjk(summary) and not any(_contains_cjk(k) for k in keywords):
+                    if verbose and lim is not None and len(content) > len(piece):
+                        print(
+                            f"[aidoc_index] 章节「{title[:40]}」使用截断正文 "
+                            f"({len(piece)}/{len(content)} chars)",
+                            file=sys.stderr,
+                        )
+                    return summary, keywords
+        if verbose and lim is not None and len(piece) < len(content):
+            print(
+                f"[aidoc_index] 章节「{title[:40]}」截断至 {len(piece)}/{len(content)} chars 仍失败，尝试更短…",
+                file=sys.stderr,
+            )
 
     if verbose:
         snippet = (last_response[:800] + "…") if len(last_response) > 800 else last_response
@@ -275,6 +374,14 @@ def summarize_chunk(
             f" 最后模型原文（截断）:\n{snippet}\n",
             file=sys.stderr,
         )
+
+    # 小节 LLM 仍失败（如网关 400）时用标题+正文预览兜底，避免索引长期空白
+    if len(content.strip()) < 4_000:
+        fb_sum, fb_kw = _title_fallback_summary(title)
+        preview = content.strip().replace("\n", " ")[:120]
+        if preview and preview.lower() not in fb_sum.lower():
+            fb_sum = f"{fb_sum}: {preview}"[:100]
+        return fb_sum, fb_kw
 
     return "", []
 
@@ -459,6 +566,7 @@ class IndexBuilder:
 
         关键字统一转小写以支持大小写无关检索。
         """
+        self.keyword_index = {}
         for chunk_id, chunk in self.chunks.items():
             for keyword in chunk.keywords:
                 keyword_lower = keyword.lower()
@@ -466,6 +574,120 @@ class IndexBuilder:
                     self.keyword_index[keyword_lower] = []
                 if chunk_id not in self.keyword_index[keyword_lower]:
                     self.keyword_index[keyword_lower].append(chunk_id)
+
+
+def _chunk_from_dict(raw: dict) -> ChunkInfo:
+    return ChunkInfo(
+        id=str(raw.get("id") or ""),
+        title=str(raw.get("title") or ""),
+        level=int(raw.get("level") or 0),
+        start_line=int(raw.get("start_line") or 0),
+        end_line=int(raw.get("end_line") or 0),
+        line_count=int(raw.get("line_count") or 0),
+        char_count=int(raw.get("char_count") or 0),
+        content_preview=str(raw.get("content_preview") or ""),
+        summary=str(raw.get("summary") or ""),
+        keywords=list(raw.get("keywords") or []),
+        children=list(raw.get("children") or []),
+    )
+
+
+def load_document_index(path: Path) -> DocumentIndex:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"索引根节点须为 object: {path}")
+    chunks_raw = data.get("chunks")
+    if not isinstance(chunks_raw, dict):
+        raise ValueError(f"索引缺少 chunks: {path}")
+    chunks = {k: _chunk_from_dict(v) for k, v in chunks_raw.items() if isinstance(v, dict)}
+    return DocumentIndex(
+        source_file=str(data.get("source_file") or ""),
+        file_size=int(data.get("file_size") or 0),
+        total_lines=int(data.get("total_lines") or 0),
+        depth_level=int(data.get("depth_level") or 2),
+        toc_tree=data.get("toc_tree") if isinstance(data.get("toc_tree"), dict) else {},
+        chunks=chunks,
+        keyword_index={},
+        metadata=dict(data.get("metadata") or {}),
+    )
+
+
+def rebuild_keyword_index(chunks: dict[str, ChunkInfo]) -> dict[str, list[str]]:
+    kw_index: dict[str, list[str]] = {}
+    for chunk_id, chunk in chunks.items():
+        for keyword in chunk.keywords:
+            keyword_lower = keyword.lower()
+            if keyword_lower not in kw_index:
+                kw_index[keyword_lower] = []
+            if chunk_id not in kw_index[keyword_lower]:
+                kw_index[keyword_lower].append(chunk_id)
+    return kw_index
+
+
+def fill_empty_summaries(
+    index: DocumentIndex,
+    parser: MarkdownParser,
+    llm: LLMClient,
+    *,
+    verbose: bool = False,
+) -> tuple[int, int]:
+    """
+    仅对 summary 为空的 chunk 重新调用 LLM，保留已有摘要与 TOC 结构。
+
+    Returns:
+        (本次新补齐数量, 仍为空数量)
+    """
+    targets = [
+        (cid, chunk)
+        for cid, chunk in index.chunks.items()
+        if not (chunk.summary or "").strip()
+    ]
+    if not targets:
+        print("无需补齐：所有章节已有摘要。")
+        index.keyword_index = rebuild_keyword_index(index.chunks)
+        index.metadata["empty_summary_count"] = 0
+        index.metadata["empty_summary_chunks"] = []
+        return 0, 0
+
+    print(f"补齐模式：共 {len(targets)}/{len(index.chunks)} 个空摘要节待处理")
+    lim = _summary_input_char_limit()
+    if lim:
+        print(f"正文截断: AIDOC_INDEX_MAX_CHUNK_CHARS={lim}")
+
+    progress = ProgressPrinter(total=len(targets), prefix="摘要补齐")
+    filled = 0
+    still_empty: list[tuple[str, str]] = []
+
+    for i, (chunk_id, chunk) in enumerate(targets, 1):
+        progress.update(i, detail=chunk.title)
+        content = parser.get_chunk_content(chunk.start_line, chunk.end_line)
+        summary, keywords = summarize_chunk(
+            llm,
+            content,
+            chunk.title,
+            verbose=verbose,
+        )
+        chunk.summary = summary
+        chunk.keywords = keywords
+        if summary:
+            filled += 1
+        else:
+            still_empty.append((chunk_id, chunk.title))
+        progress.item_done(success=bool(summary))
+
+    progress.finish()
+
+    index.keyword_index = rebuild_keyword_index(index.chunks)
+    index.metadata["empty_summary_count"] = len(still_empty)
+    index.metadata["empty_summary_chunks"] = [
+        {"id": cid, "title": t} for cid, t in still_empty
+    ]
+    index.metadata["llm_summaries"] = True
+    if llm:
+        index.metadata["model"] = llm.model
+    index.metadata["fill_empty_last_run"] = True
+
+    return filled, len(still_empty)
 
 
 # =============================================================================
@@ -494,6 +716,10 @@ def main():
   %(prog)s large_doc.md --depth 2   # 只切到 H2
   %(prog)s small_doc.md --depth 4   # 切到 H4
 
+  # 仅补齐已有索引里 summary 为空的章节（不重跑全量 LLM）
+  export AIDOC_INDEX_MAX_CHUNK_CHARS=80000
+  %(prog)s doc_enriched.md -o doc_enriched.index.h4.json --fill-empty --depth 4
+
   # 批量处理
   for f in docs/*.md; do %(prog)s "$f"; done
 
@@ -519,6 +745,11 @@ def main():
         action="store_true",
         help="使用 LLM 时若有章节摘要仍为空则退出码 1（便于脚本/CI 发现网关波动）",
     )
+    parser.add_argument(
+        "--fill-empty",
+        action="store_true",
+        help="加载 -o 已有索引，仅对 summary 为空的 chunk 调用 LLM 并写回（须与 --depth 一致）",
+    )
 
     # 添加统一的 LLM 参数（--api, --model, --api-url, --api-key, --no-llm）
     add_llm_args(parser)
@@ -538,6 +769,17 @@ def main():
         suffix = ".index.json" if getattr(args, "no_llm", False) else ".index_full.json"
         output_path = input_path.parent / f"{input_path.name}{suffix}"
 
+    fill_empty = bool(getattr(args, "fill_empty", False))
+    if fill_empty and getattr(args, "no_llm", False):
+        print("错误: --fill-empty 不能与 --no-llm 同时使用", file=sys.stderr)
+        sys.exit(1)
+    if fill_empty and not args.output:
+        print("错误: --fill-empty 须配合 -o 指定已有索引 JSON", file=sys.stderr)
+        sys.exit(1)
+    if fill_empty and not output_path.is_file():
+        print(f"错误: --fill-empty 找不到已有索引: {output_path}", file=sys.stderr)
+        sys.exit(1)
+
     # 打印横幅
     use_llm = not getattr(args, "no_llm", False)
     model_display = getattr(args, "model", None) or "(自动)"
@@ -545,6 +787,8 @@ def main():
     print(f"输入文件: {input_path}")
     print(f"输出文件: {output_path}")
     print(f"模型: {model_display if use_llm else '(不使用)'}")
+    if fill_empty:
+        print("模式: --fill-empty（仅补齐空摘要节）")
     print()
 
     # 解析 Markdown
@@ -553,15 +797,35 @@ def main():
     # 如果指定了深度，覆盖自动检测
     if args.depth:
         forced_depth = args.depth
-        md_parser.get_depth_level = lambda: forced_depth
+        md_parser.get_depth_level = lambda _d=forced_depth: _d  # type: ignore[method-assign, assignment]
 
     # 创建 LLM 客户端（通过统一工厂函数）
     llm = create_llm_client(args) if use_llm else None
 
-    # 构建索引
-    print("开始构建索引...")
-    builder = IndexBuilder(md_parser, llm, verbose=bool(args.verbose))
-    index = builder.build(use_llm=use_llm)
+    if fill_empty:
+        print(f"加载已有索引: {output_path}")
+        index = load_document_index(output_path)
+        idx_depth = index.depth_level
+        if args.depth and args.depth != idx_depth:
+            print(
+                f"警告: CLI --depth {args.depth} 与索引内 depth_level {idx_depth} 不一致，"
+                f"补齐仍使用索引内行号，请确保 -o 文件与 depth 匹配",
+                file=sys.stderr,
+            )
+        md_parser.get_depth_level = lambda _d=idx_depth: _d  # type: ignore[method-assign, assignment]
+        if llm is None:
+            print("错误: --fill-empty 需要 LLM", file=sys.stderr)
+            sys.exit(1)
+        print("开始补齐空摘要…")
+        filled, n_empty = fill_empty_summaries(index, md_parser, llm, verbose=bool(args.verbose))
+        print(f"\n本次新补齐: {filled} 节；仍为空: {n_empty} 节")
+    else:
+        # 构建索引
+        print("开始构建索引...")
+        builder = IndexBuilder(md_parser, llm, verbose=bool(args.verbose))
+        index = builder.build(use_llm=use_llm)
+        n_empty = int(index.metadata.get("empty_summary_count") or 0)
+        filled = None
 
     # 保存索引
     print(f"\n保存索引到: {output_path}")
@@ -569,20 +833,22 @@ def main():
         json.dump(index.to_dict(), f, ensure_ascii=False, indent=2)
 
     # 输出统计
-    n_empty = int(index.metadata.get("empty_summary_count") or 0)
     stats = {
         "章节数量": len(index.chunks),
         "关键字数量": len(index.keyword_index),
         "切分深度": f"H1-H{index.depth_level}",
     }
+    if fill_empty:
+        stats["本次新补齐"] = filled
     if use_llm and index.metadata.get("llm_summaries"):
         stats["摘要为空节数"] = n_empty
     print_stats(stats, title="索引统计")
     if n_empty > 0 and use_llm and index.metadata.get("llm_summaries"):
         titles = [x["title"] for x in index.metadata.get("empty_summary_chunks") or []]
+        hint = "可设 AIDOC_INDEX_MAX_CHUNK_CHARS 后加 --fill-empty 仅补空节"
         print(
-            f"\n警告: 有 {n_empty} 个章节在多次重试后仍无有效摘要，"
-            f"RAG 关键词可能偏少。可重跑本命令或加 -v 看模型原文；"
+            f"\n警告: 有 {n_empty} 个章节仍无有效摘要，"
+            f"RAG 关键词可能偏少。{hint}；"
             f"节标题: {titles[:8]}{'…' if len(titles) > 8 else ''}\n",
             file=sys.stderr,
         )
