@@ -5,6 +5,9 @@ logs/
 archive/
 # 输入 PDF 体积大，由使用者本地放置；见 input/README.txt
 input/*.pdf
+input/**/*.pdf
+input/*_parts_manifest.json
+input/**/*_parts_manifest.json
 # Python
 __pycache__/
 *.py[cod]
@@ -17,3 +20,8 @@ rag_data/
 archive.zip
 /output - 副本/
 /logs - 副本/
+output_v1/
+output_v2/
+output_experiments/
+runs/pcie61/*.pdf
+runs/pcie61/parts/

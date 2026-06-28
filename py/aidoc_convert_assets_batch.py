@@ -77,14 +77,14 @@ def build_batch_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _jobs_from_manifest(manifest_path: Path, output_dir: Path) -> list[tuple[Path, Path]]:
+def _jobs_from_manifest(manifest_path: Path, output_dir: Path) -> list[tuple[Path, Path, int]]:
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     parts = data.get("parts") or []
     if not parts:
         print("manifest 中无 parts", file=sys.stderr)
         sys.exit(1)
     base_dir = manifest_path.parent
-    jobs: list[tuple[Path, Path]] = []
+    jobs: list[tuple[Path, Path, int]] = []
     for part in parts:
         stem = part.get("stem")
         if not stem:
@@ -96,19 +96,20 @@ def _jobs_from_manifest(manifest_path: Path, output_dir: Path) -> list[tuple[Pat
             print(f"缺少分段 PDF: {pdf_path}", file=sys.stderr)
             sys.exit(2)
         out_md = (output_dir / f"{stem}.md").resolve()
-        jobs.append((pdf_path, out_md))
+        page_start = int(part.get("page_start_1based") or 1)
+        jobs.append((pdf_path, out_md, page_start))
     return jobs
 
 
-def _jobs_from_pdfs(pdfs: list[Path], output_dir: Path) -> list[tuple[Path, Path]]:
-    jobs: list[tuple[Path, Path]] = []
+def _jobs_from_pdfs(pdfs: list[Path], output_dir: Path) -> list[tuple[Path, Path, int]]:
+    jobs: list[tuple[Path, Path, int]] = []
     for pdf in pdfs:
         pdf = pdf.resolve()
         if not pdf.is_file():
             print(f"文件不存在: {pdf}", file=sys.stderr)
             sys.exit(2)
         stem = pdf.stem
-        jobs.append((pdf, (output_dir / f"{stem}.md").resolve()))
+        jobs.append((pdf, (output_dir / f"{stem}.md").resolve(), 1))
     return jobs
 
 
@@ -202,8 +203,11 @@ def main() -> None:
             pass
         converter = docling_converter_from_args(args)
 
-    for i, (pdf_path, out_path) in enumerate(jobs, start=1):
-        print(f"========== [{i}/{len(jobs)}] {pdf_path.name} -> {out_path.name} ==========")
+    for i, (pdf_path, out_path, page_start) in enumerate(jobs, start=1):
+        print(
+            f"========== [{i}/{len(jobs)}] {pdf_path.name} -> {out_path.name} "
+            f"(page_start={page_start}) =========="
+        )
         if skip_existing and out_path.is_file() and out_path.stat().st_size > 0:
             print(f"  跳过（已有非空）: {out_path}")
             ok += 1
@@ -216,6 +220,7 @@ def main() -> None:
                 out_path,
                 args,
                 print_header=bool(args.stats or args.verbose),
+                page_start_1based=page_start,
             )
             if not (args.stats or args.verbose):
                 print(f"  完成: {out_path} ({out_path.stat().st_size // 1024} KB)")

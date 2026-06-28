@@ -20,7 +20,8 @@ else
   REPO := $(abspath $(REPO))
 endif
 PY     := $(PART)/py
-OUT    := $(PART)/output
+OUT    ?= $(PART)/output
+B_SRC  ?= $(OUT)
 IN     := $(PART)/input
 LOG    := $(PART)/logs
 # 与 input/<STEM>.pdf 同名（无空格）；改 STEM 时同步重命名 input 下 PDF
@@ -57,6 +58,15 @@ A1_START_INDEX ?= 1
 # 设为 1 时传入 --skip-existing，已生成的 .md 跳过
 A1_SKIP_EXISTING ?= 0
 EXTRA_A1       :=
+# B2 筛图（本地规则，不调 VLM）
+# 默认 min_bytes=3072（3KB）；Intel 等小 logo 多在 6～7KB，例: FILTER_MIN_BYTES=10240
+# 人工排除: FILTER_EXCLUDE_IDS=fig_0000
+# 审查目录（可选，仅人工核对）: FILTER_REVIEW=1 → output/$(STEM)_filter_review_{kept,dropped}
+FILTER_MIN_BYTES ?= 3072
+FILTER_MIN_BBOX_AREA ?= 0
+FILTER_MIN_PIXELS ?= 0
+FILTER_EXCLUDE_IDS ?=
+FILTER_REVIEW ?= 0
 ifeq ($(FAST_A1),1)
   TABLE_MODE := fast
   EXTRA_A1 := --no-code-enrichment --no-formula-enrichment --no-picture-classification
@@ -164,7 +174,8 @@ clean-split-parts: dirs
 # 合并各段 output/$(STEM)_ptNNN.md -> output/$(STEM)_merged.md（图链仍指向各 *_ptNNN_images/；要单目录图见 merge-assets）
 merge-parts: dirs
 	@test -f "$(IN)/$(STEM)_parts_manifest.json" || ( echo "缺少 $(IN)/$(STEM)_parts_manifest.json，先 make pdf-split" >&2; exit 1 )
-	@python3 "$(PY)/merge_split_md.py" "$(IN)/$(STEM)_parts_manifest.json" -o "$(OUT)/$(STEM)_merged.md"
+	@python3 "$(PY)/merge_split_md.py" "$(IN)/$(STEM)_parts_manifest.json" \
+	  --output-dir "$(OUT)" -o "$(OUT)/$(STEM)_merged.md"
 
 # 合并分段图片与 *.images.json 到 output/$(STEM)_merged_images/ 与 $(STEM)_merged.images.json，并重写 _merged.md 内图路径（须先有 merge-parts）
 merge-assets: LOG_STEP := merge-assets
@@ -247,7 +258,13 @@ b2-filter: dirs
 	  python "$(PY)/filter_images.py" \
 	    --md "$(OUT)/$(STEM)_clean.md" \
 	    --images-json "$(OUT)/$(STEM).images.json" \
-	    -o "$(OUT)/$(STEM).images.filtered.json"
+	    -o "$(OUT)/$(STEM).images.filtered.json" \
+	    --min-bytes "$(FILTER_MIN_BYTES)" \
+	    --min-bbox-area "$(FILTER_MIN_BBOX_AREA)" \
+	    --min-pixels "$(FILTER_MIN_PIXELS)" \
+	    $(if $(FILTER_EXCLUDE_IDS),--exclude-ids "$(FILTER_EXCLUDE_IDS)",) \
+	    $(if $(filter 1,$(FILTER_REVIEW)),--copy-dropped "$(OUT)/$(STEM)_filter_review_dropped",) \
+	    $(if $(filter 1,$(FILTER_REVIEW)),--copy-kept "$(OUT)/$(STEM)_filter_review_kept",)
 
 b3-context: LOG_STEP := b3-context
 b3-context: dirs
@@ -273,9 +290,9 @@ b5-describe: dirs
 	BAPI="$${BATCH_BASE_URL:-$${API_URL}}"; \
 	LOG_STEP=$(LOG_STEP) $(RUN) \
 	  python "$(PY)/batch_describe.py" \
-	    --filtered-json "$(OUT)/$(STEM).images.filtered.json" \
-	    --figure-context "$(OUT)/$(STEM).figure_context.json" \
-	    --ocr-json "$(OUT)/$(STEM).ocr.json" \
+	    --filtered-json "$(B_SRC)/$(STEM).images.filtered.json" \
+	    --figure-context "$(B_SRC)/$(STEM).figure_context.json" \
+	    --ocr-json "$(B_SRC)/$(STEM).ocr.json" \
 	    --out-dir "$(OUT)/figure_schemas" \
 	    --doc-id "$(STEM)" \
 	    --api-key "$$API_KEY" --model "$$MODEL" \
@@ -286,9 +303,9 @@ b6-inject: LOG_STEP := b6-inject
 b6-inject: dirs
 	@cd "$(REPO)" && LOG_STEP=$(LOG_STEP) $(RUN) \
 	  python "$(PY)/inject_figure_enrichment.py" \
-	    --md "$(OUT)/$(STEM)_clean.md" \
+	    --md "$(B_SRC)/$(STEM)_clean.md" \
 	    --merged-json "$(OUT)/$(STEM).descriptions_merged.json" \
-	    -o "$(OUT)/$(STEM)_enriched.md" --source-tag vlm-v1
+	    -o "$(OUT)/$(STEM)_enriched.md" --source-tag vlm-v2
 
 b7-index: LOG_STEP := b7-index
 b7-index: dirs
@@ -303,13 +320,17 @@ b7-index: dirs
 b7-index-dual: LOG_STEP := b7-index-dual
 b7-index-dual: dirs
 	@cd "$(REPO)" && \
-	$(WITH_SECRETS) && LOG_STEP=$(LOG_STEP) $(RUN) \
+	$(WITH_SECRETS) && \
+	AIDOC_INDEX_MAX_CHUNK_CHARS="$${AIDOC_INDEX_MAX_CHUNK_CHARS:-80000}" \
+	LOG_STEP=$(LOG_STEP) $(RUN) \
 	  python "$(PY)/aidoc_index.py" "$(OUT)/$(STEM)_enriched.md" \
 	    --depth 4 \
 	    -o "$(OUT)/$(STEM)_enriched.index.h4.json" \
 	    --api openai --api-url "$$API_URL" --api-key "$$API_KEY" --model "$$MODEL" -v
 	@cd "$(REPO)" && \
-	$(WITH_SECRETS) && LOG_STEP=$(LOG_STEP) $(RUN) \
+	$(WITH_SECRETS) && \
+	AIDOC_INDEX_MAX_CHUNK_CHARS="$${AIDOC_INDEX_MAX_CHUNK_CHARS:-80000}" \
+	LOG_STEP=$(LOG_STEP) $(RUN) \
 	  python "$(PY)/aidoc_index.py" "$(OUT)/$(STEM)_enriched.md" \
 	    --depth 2 \
 	    -o "$(OUT)/$(STEM)_enriched.index.h2.json" \
@@ -334,6 +355,33 @@ b7-index-h2: dirs
 	    -o "$(OUT)/$(STEM)_enriched.index.h2.json" \
 	    --api openai --api-url "$$API_URL" --api-key "$$API_KEY" --model "$$MODEL" -v
 
+# 仅补齐已有索引里 summary 为空的节（不重跑全量 LLM）
+b7-fill-empty-h4: LOG_STEP := b7-fill-empty-h4
+b7-fill-empty-h4: dirs
+	@cd "$(REPO)" && \
+	$(WITH_SECRETS) && \
+	AIDOC_INDEX_MAX_CHUNK_CHARS="$${AIDOC_INDEX_MAX_CHUNK_CHARS:-80000}" \
+	LOG_STEP=$(LOG_STEP) $(RUN) \
+	  python "$(PY)/aidoc_index.py" "$(OUT)/$(STEM)_enriched.md" \
+	    --depth 4 \
+	    -o "$(OUT)/$(STEM)_enriched.index.h4.json" \
+	    --fill-empty \
+	    --api openai --api-url "$$API_URL" --api-key "$$API_KEY" --model "$$MODEL" -v
+
+b7-fill-empty-h2: LOG_STEP := b7-fill-empty-h2
+b7-fill-empty-h2: dirs
+	@cd "$(REPO)" && \
+	$(WITH_SECRETS) && \
+	AIDOC_INDEX_MAX_CHUNK_CHARS="$${AIDOC_INDEX_MAX_CHUNK_CHARS:-80000}" \
+	LOG_STEP=$(LOG_STEP) $(RUN) \
+	  python "$(PY)/aidoc_index.py" "$(OUT)/$(STEM)_enriched.md" \
+	    --depth 2 \
+	    -o "$(OUT)/$(STEM)_enriched.index.h2.json" \
+	    --fill-empty \
+	    --api openai --api-url "$$API_URL" --api-key "$$API_KEY" --model "$$MODEL" -v
+
+b7-fill-empty-dual: b7-fill-empty-h4 b7-fill-empty-h2
+
 # 聚合
 a-all: a1-convert a2-strip a3-hierarchy a4-codeblocks
 # B 段：末步为 b7-index-dual（同一份 enriched.md 输出 H4 + H2 两份 JSON，耗时/费用约为原 b7-index 两倍）
@@ -357,6 +405,8 @@ help:
 	@echo "     pdf-split  a1-batch  a1-batch-chunked(每 N 段重建管线)  merge-parts  merge-assets  merge-parts-full  clean-split-parts"
 	@echo "     a5-index  a5-index-h1/H2(对 _clean.md 仅 H1 或 H2 切块)"
 	@echo "     b1-rewrite b2-filter b3-context b4-ocr b5-describe b6-inject b-all(末步 b7-index-dual: H4+H2 两份索引)"
+	@echo "b2-filter: FILTER_MIN_BYTES=3072(默认) FILTER_EXCLUDE_IDS=fig_0000 FILTER_REVIEW=1(可选审查目录)"
+	@echo "     b7-fill-empty-dual / b7-fill-empty-h4 / b7-fill-empty-h2  仅补空摘要节(不重跑全量)"
 	@echo "     a-all  b-all  all(=a-all+b-all)  check  help"
 	@echo "环境: secrets.sh 需 API_URL / API_KEY / MODEL；可选 BATCH_BASE_URL（覆盖 B5 的 OpenAI base，须含 /v1）"
 	@echo "a1: 可选 FAST_A1=1、IMAGES_SCALE=2（省内存）或 TABLE_MODE=fast；见 py/aidoc_convert_assets.py"

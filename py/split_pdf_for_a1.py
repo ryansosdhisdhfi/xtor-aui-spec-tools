@@ -30,10 +30,12 @@ def _reader_outline_pages(reader: PdfReader) -> tuple[list[tuple[str, int]], int
             return
         try:
             page = reader.get_destination_page_number(node)
+            if page is None:
+                return
             title = getattr(node, "title", None)
             if title is None:
                 title = str(node)
-            out.append((str(title).strip() or "?", page))
+            out.append((str(title).strip() or "?", int(page)))
         except Exception:
             return
 
@@ -55,13 +57,15 @@ def get_top_level_chapters(reader: PdfReader) -> list[tuple[str, int]]:
                     if not isinstance(sub_item, list):
                         try:
                             page = reader.get_destination_page_number(sub_item)
-                            child_chapters.append((sub_item.title, page))
+                            if page is not None:
+                                child_chapters.append((sub_item.title, int(page)))
                         except Exception:
                             pass
             else:
                 try:
                     page = reader.get_destination_page_number(item)
-                    top_chapters.append((item.title, page))
+                    if page is not None:
+                        top_chapters.append((item.title, int(page)))
                 except Exception:
                     pass
 
@@ -198,6 +202,8 @@ def _atomics_in_region(
     """区域 [region_start, region_end) 内按书签页码切成连续原子区间（半开）。"""
     by_page: dict[int, str] = {}
     for title, raw_page in all_items:
+        if raw_page is None:
+            continue
         p = int(raw_page)
         if p < 0:
             p = 0
@@ -282,6 +288,8 @@ def create_outline_smart_ranges(
 
     by_page: dict[int, str] = {}
     for title, raw_page in items:
+        if raw_page is None:
+            continue
         p = int(raw_page)
         if p < 0:
             p = 0
@@ -323,6 +331,8 @@ def fixed_page_ranges(total_pages: int, max_pages: int) -> list[tuple[str, int, 
 def _all_bookmark_pages(items: list[tuple[str, int]], total_pages: int) -> list[int]:
     pages: set[int] = set()
     for _, raw in items:
+        if raw is None:
+            continue
         p = int(raw)
         if p < 0:
             p = 0
@@ -398,8 +408,13 @@ def run_qpdf_split(src: Path, start: int, end: int, out_pdf: Path) -> None:
     page_range = f"{start + 1}-{end}"
     cmd = ["qpdf", str(src), "--pages", str(src), page_range, "--", str(out_pdf)]
     r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"qpdf 失败: {r.stderr or r.stdout}")
+    # qpdf 退出码 3 = 有警告但输出通常仍有效（常见于部分 PDF 流警告）
+    if r.returncode not in (0, 3):
+        raise RuntimeError(f"qpdf 失败 (exit {r.returncode}): {r.stderr or r.stdout}")
+    if not out_pdf.is_file() or out_pdf.stat().st_size == 0:
+        raise RuntimeError(
+            f"qpdf 未生成有效输出: {out_pdf}\n{r.stderr or r.stdout}"
+        )
 
 
 def main() -> None:

@@ -311,6 +311,7 @@ class DoclingPdfConverter:
         self,
         result: ConversionResult,
         output_md_path: str,
+        page_start_1based: int = 1,
     ) -> str:
         """
         导出图片索引 JSON，并尝试将图片单独落盘。
@@ -385,6 +386,8 @@ class DoclingPdfConverter:
                 pass
 
             items.append(item_data)
+
+        apply_page_start_to_image_index(items, page_start_1based)
 
         json_path = output_md.with_suffix(".images.json")
         with open(json_path, "w", encoding="utf-8") as f:
@@ -501,6 +504,88 @@ def detect_headers_footers_by_position(
             print(f"  ... 及其他 {len(header_footer_texts) - 5} 个")
 
     return header_footer_texts
+
+
+def _global_pdf_page(local_page: int | None, page_start_1based: int) -> int | None:
+    if local_page is None:
+        return None
+    return page_start_1based + int(local_page) - 1
+
+
+def inject_pdf_page_markers(
+    markdown: str,
+    result: ConversionResult,
+    page_start_1based: int = 1,
+) -> str:
+    """
+    在 Markdown 中插入 <!-- pdf-page: N -->（N 为整本 PDF 的 1-based 页码）。
+    分段转换时传入 manifest 的 page_start_1based，避免每段从 1 重新计页。
+    """
+    if page_start_1based < 1:
+        page_start_1based = 1
+
+    doc = result.document
+    anchors: list[tuple[int, str]] = []
+    seen_local: set[int] = set()
+    current_local: int | None = None
+
+    for item, _ in doc.iterate_items():
+        prov_list = getattr(item, "prov", None) or []
+        local_page = next(
+            (p.page_no for p in prov_list if getattr(p, "page_no", None) is not None),
+            None,
+        )
+        if local_page is None or local_page == current_local or local_page in seen_local:
+            continue
+        current_local = local_page
+        seen_local.add(local_page)
+        global_page = _global_pdf_page(local_page, page_start_1based)
+        if global_page is None:
+            continue
+        text = (getattr(item, "text", None) or "").strip()
+        if len(text) < 4:
+            continue
+        anchors.append((global_page, text[:80]))
+
+    if not anchors:
+        return f"<!-- pdf-page: {page_start_1based} -->\n\n{markdown}"
+
+    out = markdown
+    seek = 0
+    inserted: set[int] = set()
+    for global_page, anchor in anchors:
+        if global_page in inserted:
+            continue
+        pos = out.find(anchor, seek)
+        if pos < 0:
+            pos = out.find(anchor)
+        if pos < 0:
+            continue
+        marker = f"<!-- pdf-page: {global_page} -->\n\n"
+        out = out[:pos] + marker + out[pos:]
+        seek = pos + len(marker) + len(anchor)
+        inserted.add(global_page)
+
+    if page_start_1based not in inserted:
+        out = f"<!-- pdf-page: {page_start_1based} -->\n\n{out}"
+    return out
+
+
+def apply_page_start_to_image_index(
+    items: list[dict],
+    page_start_1based: int,
+) -> None:
+    """将 images.json 内 local page_no 改为整本 PDF 的全局页码（原地修改）。"""
+    if page_start_1based <= 1:
+        return
+    for item in items:
+        local = item.get("page_no")
+        if local is not None:
+            item["page_no"] = _global_pdf_page(local, page_start_1based)
+        for prov in item.get("prov") or []:
+            lp = prov.get("page_no")
+            if lp is not None:
+                prov["page_no"] = _global_pdf_page(lp, page_start_1based)
 
 
 def filter_headers_footers_from_markdown(
@@ -658,6 +743,8 @@ def add_standard_convert_options(parser: argparse.ArgumentParser) -> None:
                         help="禁用 OCR")
     parser.add_argument("--no-merge-code", action="store_true",
                         help="禁用连续代码块合并 (跨页代码修复)")
+    parser.add_argument("--no-pdf-page-markers", action="store_true",
+                        help="不插入 <!-- pdf-page: N --> 页码注释")
     parser.add_argument("--keep-headers-footers", action="store_true",
                         help="保留页眉页脚 (默认过滤)")
     parser.add_argument("--ocr-lang", default="ch_sim,en",
@@ -706,6 +793,7 @@ def convert_one_pdf(
     args: argparse.Namespace,
     *,
     print_header: bool = True,
+    page_start_1based: int = 1,
 ) -> float:
     """
     对单份 PDF 执行与 main() 相同的转换与后处理；不创建新的 DoclingPdfConverter。
@@ -739,11 +827,19 @@ def convert_one_pdf(
         if args.verbose and len(markdown) != original_len:
             print("已合并跨页代码块")
 
+    if not getattr(args, "no_pdf_page_markers", False):
+        markdown = inject_pdf_page_markers(markdown, result, page_start_1based)
+        if args.verbose:
+            n_markers = markdown.count("<!-- pdf-page:")
+            print(f"已插入 pdf-page 标记: {n_markers} 处 (page_start={page_start_1based})")
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown)
 
-    converter.export_image_index(result, str(output_path))
+    converter.export_image_index(
+        result, str(output_path), page_start_1based=page_start_1based
+    )
 
     elapsed = time.time() - start_time
     if print_header:
