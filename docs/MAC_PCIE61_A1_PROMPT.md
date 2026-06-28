@@ -26,13 +26,15 @@
    python -m pip install --upgrade pip setuptools wheel
    pip install -r requirements.txt -v --default-timeout=1000
 
-4. 准备输入 PDF：
+4. 确认输入 PDF：
 
-   mkdir -p input
-   把 PCIe 6.1 PDF 放到：
+   仓库已提供示例 PDF：
+
    input/NCB-PCI_Express_Base_6.1.pdf
 
-   注意：PDF 不在 Git 里，需要从本机已有文件或合规来源放入。
+   先确认文件存在：
+
+   ls -lh input/NCB-PCI_Express_Base_6.1.pdf
 
 5. A1 整本优先试跑：
 
@@ -73,4 +75,3 @@
    - 产物大小
    - 如果失败，贴 logs/run_*_a1-convert.log 最后 80 行
 ```
-
