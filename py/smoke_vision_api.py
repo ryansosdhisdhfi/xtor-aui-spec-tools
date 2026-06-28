@@ -12,8 +12,9 @@
   API_KEY
   MODEL     如 gpt-5.4 或其它支持 vision 的模型名
 
-说明: B5 当前 batch_describe 默认传 --base-url 为 **去掉 /v1 的 host**（与 describe_image 历史一致）；
-     而 aidoc 其它步用的是带 /v1 的 API_URL。本脚本可看出「/v1 形态」对 chat+图是否可用。
+说明: B5 经 figure_describe_core 走 requests POST（与 aidoc_llm 一致）。
+     OpenAI SDK 路径（下方测试 2）在 IntelAlloc 等网关上可能被 WAF 以
+     PermissionDeniedError / "Your request was blocked" 拒绝；以测试 1 为准。
 """
 from __future__ import annotations
 

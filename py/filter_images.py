@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -89,8 +89,26 @@ def main() -> int:
         default=0,
         help="需安装 Pillow；宽*高小于此则丢弃，0=不启用",
     )
+    ap.add_argument(
+        "--copy-dropped",
+        metavar="DIR",
+        default="",
+        help="将被丢弃的图片复制到此目录（便于人工核对），并写入 dropped_manifest.json",
+    )
+    ap.add_argument(
+        "--copy-kept",
+        metavar="DIR",
+        default="",
+        help="将保留的图片复制到此目录（便于人工核对），并写入 kept_manifest.json",
+    )
+    ap.add_argument(
+        "--exclude-ids",
+        default="",
+        help="人工排除的 image_id，逗号分隔，如 fig_0000,fig_0015",
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
+    exclude_ids = {x.strip() for x in args.exclude_ids.split(",") if x.strip()}
 
     md_path = Path(args.md).resolve()
     j_path = Path(args.images_json).resolve()
@@ -153,12 +171,90 @@ def main() -> int:
                     "drop_reason": "; ".join(reasons),
                 }
             )
+        elif rec.get("image_id") in exclude_ids:
+            dropped.append(
+                {
+                    "image_id": rec.get("image_id"),
+                    "path": str(fpath),
+                    "drop_reason": "manual_exclude",
+                }
+            )
         else:
             rec["file_size_bytes"] = size
             if px:
                 rec["image_width"] = px[0]
                 rec["image_height"] = px[1]
             kept.append(rec)
+
+    dropped_staging: str | None = None
+    if args.copy_dropped and dropped:
+        stage = Path(args.copy_dropped).resolve()
+        stage.mkdir(parents=True, exist_ok=True)
+        for old in stage.glob("*.png"):
+            old.unlink()
+        manifest: list[dict[str, Any]] = []
+        for idx, d in enumerate(dropped):
+            src = Path(d["path"])
+            if not src.is_file():
+                if args.verbose:
+                    print(f"  跳过复制（文件不存在）: {src}", file=sys.stderr)
+                continue
+            safe_id = re.sub(r"[^\w.-]+", "_", str(d.get("image_id") or f"idx{idx}"))
+            dest_name = f"{idx:04d}_{safe_id}{src.suffix.lower()}"
+            dest = stage / dest_name
+            shutil.copy2(src, dest)
+            manifest.append(
+                {
+                    "index": idx,
+                    "image_id": d.get("image_id"),
+                    "drop_reason": d.get("drop_reason"),
+                    "source_path": str(src),
+                    "staged_path": str(dest),
+                    "file_size_bytes": src.stat().st_size,
+                }
+            )
+        manifest_path = stage / "dropped_manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        dropped_staging = str(stage)
+        print(f"已复制 {len(manifest)} 张 dropped 图到 {stage}")
+
+    kept_staging: str | None = None
+    if args.copy_kept and kept:
+        stage = Path(args.copy_kept).resolve()
+        stage.mkdir(parents=True, exist_ok=True)
+        for old in stage.glob("*.png"):
+            old.unlink()
+        manifest: list[dict[str, Any]] = []
+        for idx, k in enumerate(kept):
+            src = Path(k["_artifact_path"])
+            if not src.is_file():
+                if args.verbose:
+                    print(f"  跳过复制（文件不存在）: {src}", file=sys.stderr)
+                continue
+            safe_id = re.sub(r"[^\w.-]+", "_", str(k.get("image_id") or f"idx{idx}"))
+            dest_name = f"{idx:04d}_{safe_id}{src.suffix.lower()}"
+            dest = stage / dest_name
+            shutil.copy2(src, dest)
+            manifest.append(
+                {
+                    "index": idx,
+                    "image_id": k.get("image_id"),
+                    "page_no": k.get("page_no"),
+                    "source_path": str(src),
+                    "staged_path": str(dest),
+                    "file_size_bytes": k.get("file_size_bytes"),
+                    "image_width": k.get("image_width"),
+                    "image_height": k.get("image_height"),
+                }
+            )
+        manifest_path = stage / "kept_manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        kept_staging = str(stage)
+        print(f"已复制 {len(manifest)} 张 kept 图到 {stage}")
 
     out: dict[str, Any] = {
         "source_md": str(md_path),
@@ -167,6 +263,7 @@ def main() -> int:
             "min_bytes": args.min_bytes,
             "min_bbox_area": args.min_bbox_area,
             "min_pixels": args.min_pixels,
+            "exclude_ids": sorted(exclude_ids),
         },
         "kept": kept,
         "dropped": dropped,
@@ -175,6 +272,8 @@ def main() -> int:
             "matched_pairs": n,
             "kept_count": len(kept),
             "dropped_count": len(dropped),
+            "dropped_staging_dir": dropped_staging,
+            "kept_staging_dir": kept_staging,
         },
     }
 

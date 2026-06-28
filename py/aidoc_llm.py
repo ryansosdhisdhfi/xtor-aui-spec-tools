@@ -365,6 +365,19 @@ class OpenAIClient(LLMClient):
                 )
                 sc = resp.status_code
                 if sc != 200:
+                    if sc == 400 and os.environ.get("AIDOC_DEBUG_LLM"):
+                        print(
+                            f"[aidoc_llm] HTTP 400 body: {resp.text[:800]}",
+                            file=sys.stderr,
+                        )
+                    elif sc == 400:
+                        try:
+                            err_obj = resp.json().get("error", {})
+                            msg = err_obj.get("message") if isinstance(err_obj, dict) else None
+                            if msg:
+                                print(f"OpenAI API HTTP 400: {msg}", file=sys.stderr)
+                        except ValueError:
+                            pass
                     if _openai_transient_http_status(sc) and attempt < max_retries:
                         delay = min(
                             60.0,
